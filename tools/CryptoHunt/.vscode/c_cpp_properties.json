@@ -1,0 +1,35 @@
+{
+  "configurations": [
+    {
+      "name": "Win32-PIN",
+      "intelliSenseMode": "windows-msvc-x86",
+      "compilerPath": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx86/x86/cl.exe",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "${workspaceFolder}/tracer",
+
+        "C:/pin-external-3.31-98869-gfa6f126a8-msvc-windows/source/include/pin",
+        "C:/pin-external-3.31-98869-gfa6f126a8-msvc-windows/source/include/pin/gen",
+
+        "C:/pin-external-3.31-98869-gfa6f126a8-msvc-windows/extras/components/include",
+
+        "C:/pin-external-3.31-98869-gfa6f126a8-msvc-windows/extras/crt/include",
+        "C:/pin-external-3.31-98869-gfa6f126a8-msvc-windows/extras/crt/include/arch-x86",
+        "C:/pin-external-3.31-98869-gfa6f126a8-msvc-windows/extras/crt/include/kernel/uapi",
+        "C:/pin-external-3.31-98869-gfa6f126a8-msvc-windows/extras/crt/include/kernel/uapi/asm-x86",
+
+        "C:/pin-external-3.31-98869-gfa6f126a8-msvc-windows/extras/xed-ia32/include/xed"
+      ],
+      "defines": [
+        "PIN_CRT",
+        "TARGET_WINDOWS",
+        "TARGET_IA32",
+        "HOST_WINDOWS",
+        "HOST_IA32"
+      ],
+      "cStandard": "c17",
+      "cppStandard": "c++17"
+    }
+  ],
+  "version": 4
+}
