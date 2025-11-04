@@ -1,0 +1,269 @@
+{
+	"artifacts" : 
+	[
+		{
+			"path" : "python/RelWithDebInfo/udmp_parser.cp313-win_amd64.pyd"
+		},
+		{
+			"path" : "python/RelWithDebInfo/udmp_parser.pdb"
+		}
+	],
+	"backtrace" : 2,
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"add_library",
+			"nanobind_add_module",
+			"install",
+			"target_link_libraries",
+			"nanobind_build_library",
+			"target_compile_options",
+			"nanobind_compile_options",
+			"nanobind_opt_size",
+			"target_compile_definitions",
+			"target_include_directories"
+		],
+		"files" : 
+		[
+			"C:/Users/user/Desktop/udmp-parser-main/.venv/Lib/site-packages/nanobind/cmake/nanobind-config.cmake",
+			"python/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 1
+			},
+			{
+				"command" : 1,
+				"file" : 1,
+				"line" : 37,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 336,
+				"parent" : 1
+			},
+			{
+				"command" : 2,
+				"file" : 1,
+				"line" : 55,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 403,
+				"parent" : 1
+			},
+			{
+				"command" : 3,
+				"file" : 1,
+				"line" : 40,
+				"parent" : 0
+			},
+			{
+				"command" : 4,
+				"file" : 0,
+				"line" : 386,
+				"parent" : 1
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 231,
+				"parent" : 6
+			},
+			{
+				"command" : 6,
+				"file" : 0,
+				"line" : 338,
+				"parent" : 1
+			},
+			{
+				"command" : 5,
+				"file" : 0,
+				"line" : 309,
+				"parent" : 8
+			},
+			{
+				"command" : 7,
+				"file" : 0,
+				"line" : 410,
+				"parent" : 1
+			},
+			{
+				"command" : 5,
+				"file" : 0,
+				"line" : 278,
+				"parent" : 10
+			},
+			{
+				"command" : 8,
+				"file" : 1,
+				"line" : 63,
+				"parent" : 0
+			},
+			{
+				"command" : 9,
+				"file" : 1,
+				"line" : 54,
+				"parent" : 0
+			}
+		]
+	},
+	"compileGroups" : 
+	[
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "/DWIN32 /D_WINDOWS /EHsc /Zi /O2 /Ob1 /DNDEBUG -std:c++20 -MD"
+				},
+				{
+					"backtrace" : 9,
+					"fragment" : "/bigobj"
+				},
+				{
+					"backtrace" : 9,
+					"fragment" : "/MP"
+				},
+				{
+					"backtrace" : 11,
+					"fragment" : "/Os"
+				}
+			],
+			"defines" : 
+			[
+				{
+					"backtrace" : 12,
+					"define" : "NOMINMAX"
+				},
+				{
+					"define" : "udmp_parser_EXPORTS"
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 13,
+					"path" : "C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/lib"
+				},
+				{
+					"backtrace" : 4,
+					"path" : "C:/Users/user/Desktop/udmp-parser-main/.venv/Lib/site-packages/nanobind/include"
+				},
+				{
+					"backtrace" : 4,
+					"isSystem" : true,
+					"path" : "C:/Users/user/AppData/Local/Programs/Python/Python313/Include"
+				}
+			],
+			"language" : "CXX",
+			"languageStandard" : 
+			{
+				"backtraces" : 
+				[
+					4
+				],
+				"standard" : "20"
+			},
+			"sourceIndexes" : 
+			[
+				0,
+				1
+			]
+		}
+	],
+	"dependencies" : 
+	[
+		{
+			"backtrace" : 4,
+			"id" : "nanobind-static::@e1ac5446165bc0cf31e4"
+		},
+		{
+			"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df"
+		}
+	],
+	"id" : "udmp_parser::@e1ac5446165bc0cf31e4",
+	"install" : 
+	{
+		"destinations" : 
+		[
+			{
+				"backtrace" : 3,
+				"path" : "bindings/python"
+			}
+		],
+		"prefix" : 
+		{
+			"path" : "C:/Program Files/udmp-parser"
+		}
+	},
+	"link" : 
+	{
+		"commandFragments" : 
+		[
+			{
+				"fragment" : "/machine:x64 /debug /INCREMENTAL",
+				"role" : "flags"
+			},
+			{
+				"backtrace" : 4,
+				"fragment" : "RelWithDebInfo\\nanobind-static.lib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 5,
+				"fragment" : "DbgHelp.lib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 7,
+				"fragment" : "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python313\\libs\\python313.lib",
+				"role" : "libraries"
+			},
+			{
+				"fragment" : "kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib",
+				"role" : "libraries"
+			}
+		],
+		"language" : "CXX"
+	},
+	"name" : "udmp_parser",
+	"nameOnDisk" : "udmp_parser.cp313-win_amd64.pyd",
+	"paths" : 
+	{
+		"build" : "python",
+		"source" : "python"
+	},
+	"sourceGroups" : 
+	[
+		{
+			"name" : "Source Files",
+			"sourceIndexes" : 
+			[
+				0,
+				1
+			]
+		}
+	],
+	"sources" : 
+	[
+		{
+			"backtrace" : 2,
+			"compileGroupIndex" : 0,
+			"path" : "python/src/udmp_parser_utils.cc",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 2,
+			"compileGroupIndex" : 0,
+			"path" : "python/src/udmp_parser.cc",
+			"sourceGroupIndex" : 0
+		}
+	],
+	"type" : "MODULE_LIBRARY"
+}

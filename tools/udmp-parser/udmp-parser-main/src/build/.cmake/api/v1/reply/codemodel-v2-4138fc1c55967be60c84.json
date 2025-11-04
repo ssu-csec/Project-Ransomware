@@ -1,0 +1,636 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						2,
+						3
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						2
+					]
+				},
+				{
+					"build" : "lib",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-lib-Debug-f9eec315943f68976b84.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "lib"
+				},
+				{
+					"build" : "parser",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-parser-Debug-7c64fe24f6545c397964.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "parser",
+					"targetIndexes" : 
+					[
+						4
+					]
+				},
+				{
+					"build" : "python",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-python-Debug-dc76e2ea7132327cd004.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "python",
+					"targetIndexes" : 
+					[
+						1,
+						3,
+						5
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1
+					],
+					"directoryIndexes" : 
+					[
+						0,
+						1,
+						2
+					],
+					"name" : "udmp-parser",
+					"targetIndexes" : 
+					[
+						0,
+						2,
+						4
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						3
+					],
+					"name" : "udmp-parser-python",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1,
+						3,
+						5
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "ALL_BUILD::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ALL_BUILD-Debug-3ed9aad7db606ad7ef52.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "ALL_BUILD::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-ALL_BUILD-Debug-37d007ddac46c27c9028.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ZERO_CHECK-Debug-ef5b0f235952404facd3.json",
+					"name" : "ZERO_CHECK",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "nanobind-static::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-nanobind-static-Debug-30fdd6efea07838359bc.json",
+					"name" : "nanobind-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "parser::@72798c8d109b1720528b",
+					"jsonFile" : "target-parser-Debug-4e3ef042232cb4449162.json",
+					"name" : "parser",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "udmp_parser::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-udmp_parser-Debug-bd3a1d51df0dbfcd4d66.json",
+					"name" : "udmp_parser",
+					"projectIndex" : 1
+				}
+			]
+		},
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						2,
+						3
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Release-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						2
+					]
+				},
+				{
+					"build" : "lib",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-lib-Release-f9eec315943f68976b84.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "lib"
+				},
+				{
+					"build" : "parser",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-parser-Release-4a9f6dcf11558ac5019a.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "parser",
+					"targetIndexes" : 
+					[
+						4
+					]
+				},
+				{
+					"build" : "python",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-python-Release-0672a0a69f0872cf9fb0.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "python",
+					"targetIndexes" : 
+					[
+						1,
+						3,
+						5
+					]
+				}
+			],
+			"name" : "Release",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1
+					],
+					"directoryIndexes" : 
+					[
+						0,
+						1,
+						2
+					],
+					"name" : "udmp-parser",
+					"targetIndexes" : 
+					[
+						0,
+						2,
+						4
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						3
+					],
+					"name" : "udmp-parser-python",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1,
+						3,
+						5
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "ALL_BUILD::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ALL_BUILD-Release-3ed9aad7db606ad7ef52.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "ALL_BUILD::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-ALL_BUILD-Release-37d007ddac46c27c9028.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ZERO_CHECK-Release-ef5b0f235952404facd3.json",
+					"name" : "ZERO_CHECK",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "nanobind-static::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-nanobind-static-Release-6df7effc9507b82cf00f.json",
+					"name" : "nanobind-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "parser::@72798c8d109b1720528b",
+					"jsonFile" : "target-parser-Release-520720d8890f1aed1ea8.json",
+					"name" : "parser",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "udmp_parser::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-udmp_parser-Release-86cee206a77db1271365.json",
+					"name" : "udmp_parser",
+					"projectIndex" : 1
+				}
+			]
+		},
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						2,
+						3
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-MinSizeRel-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						2
+					]
+				},
+				{
+					"build" : "lib",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-lib-MinSizeRel-f9eec315943f68976b84.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "lib"
+				},
+				{
+					"build" : "parser",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-parser-MinSizeRel-a07f9780a26ae2eba8b3.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "parser",
+					"targetIndexes" : 
+					[
+						4
+					]
+				},
+				{
+					"build" : "python",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-python-MinSizeRel-d9060846d824dcca558d.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "python",
+					"targetIndexes" : 
+					[
+						1,
+						3,
+						5
+					]
+				}
+			],
+			"name" : "MinSizeRel",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1
+					],
+					"directoryIndexes" : 
+					[
+						0,
+						1,
+						2
+					],
+					"name" : "udmp-parser",
+					"targetIndexes" : 
+					[
+						0,
+						2,
+						4
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						3
+					],
+					"name" : "udmp-parser-python",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1,
+						3,
+						5
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "ALL_BUILD::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ALL_BUILD-MinSizeRel-3ed9aad7db606ad7ef52.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "ALL_BUILD::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-ALL_BUILD-MinSizeRel-37d007ddac46c27c9028.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ZERO_CHECK-MinSizeRel-ef5b0f235952404facd3.json",
+					"name" : "ZERO_CHECK",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "nanobind-static::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-nanobind-static-MinSizeRel-e7710f0021d654a7a657.json",
+					"name" : "nanobind-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "parser::@72798c8d109b1720528b",
+					"jsonFile" : "target-parser-MinSizeRel-0120092a07dbf8e1d1e1.json",
+					"name" : "parser",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "udmp_parser::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-udmp_parser-MinSizeRel-847a9c34641dc0da9702.json",
+					"name" : "udmp_parser",
+					"projectIndex" : 1
+				}
+			]
+		},
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						2,
+						3
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-RelWithDebInfo-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						2
+					]
+				},
+				{
+					"build" : "lib",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-lib-RelWithDebInfo-f9eec315943f68976b84.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "lib"
+				},
+				{
+					"build" : "parser",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-parser-RelWithDebInfo-4c0c9afe952437090a3b.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "parser",
+					"targetIndexes" : 
+					[
+						4
+					]
+				},
+				{
+					"build" : "python",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-python-RelWithDebInfo-0097a7d986d54daa3750.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.20"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "python",
+					"targetIndexes" : 
+					[
+						1,
+						3,
+						5
+					]
+				}
+			],
+			"name" : "RelWithDebInfo",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1
+					],
+					"directoryIndexes" : 
+					[
+						0,
+						1,
+						2
+					],
+					"name" : "udmp-parser",
+					"targetIndexes" : 
+					[
+						0,
+						2,
+						4
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						3
+					],
+					"name" : "udmp-parser-python",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1,
+						3,
+						5
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "ALL_BUILD::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ALL_BUILD-RelWithDebInfo-3ed9aad7db606ad7ef52.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "ALL_BUILD::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-ALL_BUILD-RelWithDebInfo-37d007ddac46c27c9028.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ZERO_CHECK-RelWithDebInfo-ef5b0f235952404facd3.json",
+					"name" : "ZERO_CHECK",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "nanobind-static::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-nanobind-static-RelWithDebInfo-d30eca2d40603fed4d84.json",
+					"name" : "nanobind-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "parser::@72798c8d109b1720528b",
+					"jsonFile" : "target-parser-RelWithDebInfo-f2d9ddb70703e4357043.json",
+					"name" : "parser",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "udmp_parser::@e1ac5446165bc0cf31e4",
+					"jsonFile" : "target-udmp_parser-RelWithDebInfo-852a786faa193c795a1b.json",
+					"name" : "udmp_parser",
+					"projectIndex" : 1
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build",
+		"source" : "C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 8
+	}
+}
