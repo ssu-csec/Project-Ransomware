@@ -1,0 +1,10 @@
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/CMakeFiles/INSTALL.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/CMakeFiles/ZERO_CHECK.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/lib/CMakeFiles/INSTALL.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/parser/CMakeFiles/parser.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/parser/CMakeFiles/INSTALL.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/python/CMakeFiles/udmp_parser.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/python/CMakeFiles/nanobind-static.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/python/CMakeFiles/INSTALL.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/python/CMakeFiles/ALL_BUILD.dir

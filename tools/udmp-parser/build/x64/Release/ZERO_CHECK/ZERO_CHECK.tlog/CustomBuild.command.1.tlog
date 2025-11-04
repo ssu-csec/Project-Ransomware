@@ -1,0 +1,10 @@
+^C:\USERS\USER\DESKTOP\UDMP-PARSER-MAIN\BUILD\CMAKEFILES\EBDA10A53C71A4A2137598C414454E92\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src -BC:/Users/user/Desktop/udmp-parser-main/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/user/Desktop/udmp-parser-main/build/udmp-parser.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

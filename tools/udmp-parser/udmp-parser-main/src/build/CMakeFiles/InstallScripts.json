@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/cmake_install.cmake",
+		"C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/lib/cmake_install.cmake",
+		"C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/parser/cmake_install.cmake",
+		"C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/build/python/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

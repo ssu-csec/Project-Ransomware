@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\user\Desktop\udmp-parser-main\build\CMakeFiles\3ba1166153db4537ea9a397eec7abee1\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{D3CF5334-322C-370B-9838-168F168CF2CB}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

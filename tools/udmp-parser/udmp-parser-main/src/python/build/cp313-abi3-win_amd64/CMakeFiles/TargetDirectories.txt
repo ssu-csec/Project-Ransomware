@@ -1,0 +1,5 @@
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/python/build/cp313-abi3-win_amd64/CMakeFiles/udmp_parser.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/python/build/cp313-abi3-win_amd64/CMakeFiles/nanobind-static.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/python/build/cp313-abi3-win_amd64/CMakeFiles/INSTALL.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/python/build/cp313-abi3-win_amd64/CMakeFiles/ALL_BUILD.dir
+C:/Users/user/Desktop/udmp-parser-main/udmp-parser-main/src/python/build/cp313-abi3-win_amd64/CMakeFiles/ZERO_CHECK.dir
