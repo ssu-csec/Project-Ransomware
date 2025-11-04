@@ -65,3 +65,6 @@ tools/CryptoHunt/**/*.dmp
 tools/CryptoHunt/tracer/instrace.txt
 tools/CryptoHunt/pin.log
 tools/CryptoHunt/tracer/pin.log
+tools/CryptoHunt/tracer/instrace.txt
+tools/CryptoHunt/pin.log
+tools/CryptoHunt/tracer/pin.log
