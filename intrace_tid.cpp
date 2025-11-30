@@ -1,7 +1,6 @@
 // === MyPinTool.cpp (Pin 3.31 / IA-32 / VS2022) ===
 // - per-thread IP trace -> prefix_<OS_TID>.bin
-// - 최소한의 C++11 기능만 사용(VC 표준 모드/매크로 충돌 회피)
-// - 디버그 로그 강화, flush 제어 가능
+
 
 #ifdef _MSC_VER
 // pinsync.hpp에서 뜨는 C5208 경고 무시
