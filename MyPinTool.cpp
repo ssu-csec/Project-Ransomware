@@ -1,9 +1,16 @@
 // === MyPinTool.cpp ===
 // Pin 3.31 / Windows / IA-32 / MSVC
-// - main executable만 계측(only_main=1)
+// - main 실행파일만 계측(only_main=1이면)
 // - per-thread 동적 trace에서 루프 자동 탐지
 // - 상위 N개 루프(body 구조 기준)만 파일로 덤프
-// - 덤프 포맷:
+// - 그 루프들을 전 스레드 단위로 모아서
+//     prefix + "_loops.csv" (예: wc_all_loops.csv) 생성
+//
+//   CSV 포맷:
+//     tid,rank_global,rank_thread,start_addr,end_addr,body_len,iter,score,
+//     func,img,memR,memW,stackR,stackW,xor,addsub,shlshr,mul
+//
+//   trace 파일 포맷(기존과 동일):
 //     addr;func;assembly;eax,ebx,ecx,edx,esi,edi,esp,ebp,memaddr,
 //
 //   예:
@@ -58,14 +65,33 @@ static string Trim(const string& s)
     return s.substr(b, e - b + 1);
 }
 
+static bool ContainsIgnoreCase(const string& haystack, const string& needle)
+{
+    if (needle.empty()) return false;
+    string h = haystack;
+    string n = needle;
+    for (size_t i = 0; i < h.size(); ++i)
+        h[i] = (char)tolower((unsigned char)h[i]);
+    for (size_t i = 0; i < n.size(); ++i)
+        n[i] = (char)tolower((unsigned char)n[i]);
+    return h.find(n) != string::npos;
+}
+
 // ===== 정적 메타 정보 (IP별) =====
 struct StaticMeta {
-    ADDRINT          addrn;      // 정수 주소
-    string           addrStr;    // "00401000"
-    string           assembly;   // 전체 디스어셈
-    string           opcstr;     // opcode 문자열
-    vector<string>   oprs;       // operand 문자열들
-    string           funcName;   // 함수 이름 (RTN 기준 / fallback 포함)
+    ADDRINT          addrn;          // 정수 주소
+    string           addrStr;        // "00401000"
+    string           assembly;       // 전체 디스어셈
+    string           opcstr;         // opcode 문자열
+    vector<string>   oprs;           // operand 문자열들
+
+    string           funcName;       // containing 함수 이름 (RTN 기준 / fallback 포함)
+    string           imgName;        // 이 IP가 속한 이미지 이름 (모듈 경로)
+
+    bool             isCall;         // call 인스트럭션인가?
+    ADDRINT          callTargetAddr; // direct call 타깃 주소(있으면)
+    string           callTargetFunc; // call 타깃 함수 이름
+    string           callTargetImg;  // call 타깃 모듈 이름
 };
 
 // ===== 동적 인스트럭션 레코드 =====
@@ -80,7 +106,18 @@ struct Inst {
     int               oprnum;    // operand 개수
     UINT32            ctxreg[8]; // EAX,EBX,ECX,EDX,ESI,EDI,ESP,EBP
     UINT32            memaddr;   // 메모리 RW 주소(없으면 0)
-    string            funcName;  // 함수 이름
+
+    bool              hasMem;    // 메모리 접근 여부
+    bool              isRead;    // 메모리 읽기
+    bool              isWrite;   // 메모리 쓰기
+    bool              isStack;   // 스택(ESP/EBP) 기반 접근인지
+
+    string            funcName;       // containing 함수 이름
+    string            imgName;        // containing 모듈 이름
+
+    bool              isCall;         // call 인가?
+    string            callTargetFunc; // call 타깃 함수 이름
+    string            callTargetImg;  // call 타깃 모듈 이름
 };
 
 // ===== 루프 분석용 구조체 =====
@@ -121,10 +158,69 @@ static ADDRINT gMainHigh = 0;
 // 정적 메타: IP → StaticMeta
 static map<ADDRINT, StaticMeta> gMeta;
 
+// ===== 전역 루프 통계 구조체 (CSV용) =====
+struct LoopStatsRow {
+    UINT32      tid;          // OS TID
+    UINT32      rank_thread;  // 해당 thread 내 순위 (1..top)
+    UINT32      rank_global;  // 전체 루프 기준 순위 (OnFini에서 채움)
+    unsigned int start_addr;  // 루프 시작 주소
+    unsigned int end_addr;    // 루프 끝 주소
+    UINT64      body_len;     // 루프 body 길이(인스트럭션 수)
+    UINT64      iterCount;    // 루프 반복 횟수(동적 인스턴스 수)
+    double      score;        // 기본 score = body_len * iterCount
+
+    string      func;         // 루프가 속한 함수
+    string      img;          // 루프가 속한 모듈
+
+    UINT64      memR;
+    UINT64      memW;
+    UINT64      stackR;
+    UINT64      stackW;
+    UINT64      xorCnt;
+    UINT64      addsubCnt;
+    UINT64      shlshrCnt;
+    UINT64      mulCnt;
+};
+
+static vector<LoopStatsRow> gAllLoops;
+static PIN_LOCK             gLock;    // gAllLoops 보호용
+
 // ===== 헬퍼 =====
 static inline bool InMainRange(ADDRINT ip)
 {
     return (gMainLow && gMainHigh && ip >= gMainLow && ip < gMainHigh);
+}
+
+static bool IsStackOperand(const vector<string>& ops)
+{
+    for (size_t i = 0; i < ops.size(); ++i) {
+        const string& s = ops[i];
+        if (ContainsIgnoreCase(s, "esp") || ContainsIgnoreCase(s, "ebp"))
+            return true;
+    }
+    return false;
+}
+
+static void AccumulateOpCounters(const Inst& ins, LoopStatsRow& row)
+{
+    string op = ins.opcstr;
+    for (size_t i = 0; i < op.size(); ++i)
+        op[i] = (char)tolower((unsigned char)op[i]);
+
+    if (op == "xor" || op == "pxor" || op == "vpxor") {
+        row.xorCnt++;
+    }
+    else if (op == "add" || op == "sub" || op == "adc" || op == "sbb" ||
+        op == "inc" || op == "dec") {
+        row.addsubCnt++;
+    }
+    else if (op == "shl" || op == "sal" || op == "shr" || op == "sar" ||
+        op == "rol" || op == "ror") {
+        row.shlshrCnt++;
+    }
+    else if (op == "mul" || op == "imul" || op == "fmul") {
+        row.mulCnt++;
+    }
 }
 
 // ===== Image load 콜백 =====
@@ -154,8 +250,8 @@ static bool ShouldRecord(TData* td)
     if (td->insts.size() >= KnobMaxInsts.Value()) {
         td->recording = FALSE;
         cerr << "[pin-loop] TID=" << td->os_tid
-             << " instlist reached max_insts=" << KnobMaxInsts.Value()
-             << ", stop recording further instructions\n";
+            << " instlist reached max_insts=" << KnobMaxInsts.Value()
+            << ", stop recording further instructions\n";
         return false;
     }
     return true;
@@ -193,7 +289,18 @@ static VOID RecordNoMem(THREADID tid, ADDRINT ip, const CONTEXT* ctx)
     insRec.oprs = sm.oprs;
     insRec.oprnum = (int)sm.oprs.size();
     insRec.memaddr = 0;
+
+    insRec.hasMem = false;
+    insRec.isRead = false;
+    insRec.isWrite = false;
+    insRec.isStack = false;
+
     insRec.funcName = sm.funcName;
+    insRec.imgName = sm.imgName;
+    insRec.isCall = sm.isCall;
+    insRec.callTargetFunc = sm.callTargetFunc;
+    insRec.callTargetImg = sm.callTargetImg;
+
     FillRegs(insRec.ctxreg, ctx);
     insRec.opc = 0; // preprocess에서 채움
 
@@ -219,7 +326,18 @@ static VOID RecordMemR(THREADID tid, ADDRINT ip, const CONTEXT* ctx, ADDRINT ea)
     insRec.oprs = sm.oprs;
     insRec.oprnum = (int)sm.oprs.size();
     insRec.memaddr = (UINT32)ea;
+
+    insRec.hasMem = true;
+    insRec.isRead = true;
+    insRec.isWrite = false;
+    insRec.isStack = IsStackOperand(sm.oprs);
+
     insRec.funcName = sm.funcName;
+    insRec.imgName = sm.imgName;
+    insRec.isCall = sm.isCall;
+    insRec.callTargetFunc = sm.callTargetFunc;
+    insRec.callTargetImg = sm.callTargetImg;
+
     FillRegs(insRec.ctxreg, ctx);
     insRec.opc = 0;
 
@@ -245,7 +363,18 @@ static VOID RecordMemW(THREADID tid, ADDRINT ip, const CONTEXT* ctx, ADDRINT ea)
     insRec.oprs = sm.oprs;
     insRec.oprnum = (int)sm.oprs.size();
     insRec.memaddr = (UINT32)ea;
+
+    insRec.hasMem = true;
+    insRec.isRead = false;
+    insRec.isWrite = true;
+    insRec.isStack = IsStackOperand(sm.oprs);
+
     insRec.funcName = sm.funcName;
+    insRec.imgName = sm.imgName;
+    insRec.isCall = sm.isCall;
+    insRec.callTargetFunc = sm.callTargetFunc;
+    insRec.callTargetImg = sm.callTargetImg;
+
     FillRegs(insRec.ctxreg, ctx);
     insRec.opc = 0;
 
@@ -266,23 +395,29 @@ static VOID OnIns(INS ins, VOID*)
         StaticMeta m;
         m.addrn = a;
 
-        ostringstream addrss;
-        addrss << hex << setw(8) << setfill('0') << (unsigned int)a;
-        m.addrStr = addrss.str();
+        // 주소 문자열
+        {
+            ostringstream addrss;
+            addrss << hex << setw(8) << setfill('0') << (unsigned int)a;
+            m.addrStr = addrss.str();
+        }
 
         m.assembly = INS_Disassemble(ins);
 
-        istringstream disasbuf(m.assembly);
-        getline(disasbuf, m.opcstr, ' ');
+        // opcode + operand 파싱
+        {
+            istringstream disasbuf(m.assembly);
+            getline(disasbuf, m.opcstr, ' ');
 
-        string temp;
-        while (getline(disasbuf, temp, ',')) {
-            temp = Trim(temp);
-            if (!temp.empty())
-                m.oprs.push_back(temp);
+            string temp;
+            while (getline(disasbuf, temp, ',')) {
+                temp = Trim(temp);
+                if (!temp.empty())
+                    m.oprs.push_back(temp);
+            }
         }
 
-        // ===== 함수 이름 해석 로직 (강화) =====
+        // ===== containing 함수 이름 해석 =====
         string funcName;
         RTN rtn = INS_Rtn(ins);
         if (!RTN_Valid(rtn)) {
@@ -290,6 +425,7 @@ static VOID OnIns(INS ins, VOID*)
             rtn = RTN_FindByAddress(a);
         }
 
+        IMG imgForFunc = IMG_Invalid();
         if (RTN_Valid(rtn)) {
             string rawName = RTN_Name(rtn);
             string undec = PIN_UndecorateSymbolName(rawName, UNDECORATION_NAME_ONLY);
@@ -297,15 +433,19 @@ static VOID OnIns(INS ins, VOID*)
                 funcName = undec;
             else
                 funcName = rawName;
-        } else {
-            // RTN이 아예 없으면 모듈+오프셋으로 fallback
-            IMG img = IMG_FindByAddress(a);
-            if (IMG_Valid(img)) {
+
+            SEC sec = RTN_Sec(rtn);
+            imgForFunc = SEC_Img(sec);
+        }
+        else {
+            imgForFunc = IMG_FindByAddress(a);
+            if (IMG_Valid(imgForFunc)) {
                 ostringstream oss;
-                oss << IMG_Name(img) << "+0x"
-                    << hex << (a - IMG_LowAddress(img));
+                oss << IMG_Name(imgForFunc) << "+0x"
+                    << hex << (a - IMG_LowAddress(imgForFunc));
                 funcName = oss.str();
-            } else {
+            }
+            else {
                 ostringstream oss;
                 oss << "0x" << hex << a;
                 funcName = oss.str();
@@ -313,6 +453,51 @@ static VOID OnIns(INS ins, VOID*)
         }
 
         m.funcName = funcName;
+
+        // 이미지 이름 (모듈 경로)
+        if (IMG_Valid(imgForFunc)) {
+            m.imgName = IMG_Name(imgForFunc);
+        }
+        else {
+            IMG img2 = IMG_FindByAddress(a);
+            if (IMG_Valid(img2))
+                m.imgName = IMG_Name(img2);
+            else
+                m.imgName = "";
+        }
+
+        // ===== call 여부 및 call 타깃 정보 =====
+        m.isCall = INS_IsCall(ins);
+        m.callTargetAddr = 0;
+        m.callTargetFunc.clear();
+        m.callTargetImg.clear();
+
+        if (m.isCall && INS_IsDirectControlFlow(ins)) {
+            ADDRINT tgt = INS_DirectBranchOrCallTargetAddress(ins);
+            m.callTargetAddr = tgt;
+
+            RTN crtn = RTN_FindByAddress(tgt);
+            if (RTN_Valid(crtn)) {
+                string raw = RTN_Name(crtn);
+                string undec = PIN_UndecorateSymbolName(raw, UNDECORATION_NAME_ONLY);
+                m.callTargetFunc = undec.empty() ? raw : undec;
+
+                SEC csec = RTN_Sec(crtn);
+                IMG cimg = SEC_Img(csec);
+                if (IMG_Valid(cimg))
+                    m.callTargetImg = IMG_Name(cimg);
+            }
+            else {
+                IMG cimg = IMG_FindByAddress(tgt);
+                if (IMG_Valid(cimg)) {
+                    ostringstream oss;
+                    oss << IMG_Name(cimg) << "+0x"
+                        << hex << (tgt - IMG_LowAddress(cimg));
+                    m.callTargetFunc = oss.str();
+                    m.callTargetImg = IMG_Name(cimg);
+                }
+            }
+        }
 
         gMeta.insert(make_pair(a, m));
     }
@@ -405,7 +590,7 @@ static bool isLoopBodyEq(const LoopBody& lp1, const LoopBody& lp2)
     return (it1->opc == it2->opc && it1 == end1 && it2 == end2);
 }
 
-// ===== 루프 분석 & 파일 출력 =====
+// ===== 루프 분석 & 파일 출력 & CSV 통합 =====
 static VOID AnalyzeLoops(list<Inst>& L,
     UINT32 os_tid,
     const string& prefix,
@@ -534,12 +719,12 @@ static VOID AnalyzeLoops(list<Inst>& L,
 
     // 5) 루프 후보 스코어링 (body 길이 * 반복 수)
     struct LoopCand {
-        Loop*       loop;
-        LoopBody    body;
-        size_t      index;
-        int         bodyLen;
-        size_t      iterCount;
-        double      score;
+        Loop* loop;
+        LoopBody     body;
+        size_t       index;
+        int          bodyLen;
+        size_t       iterCount;
+        double       score;
     };
 
     vector<LoopCand> cands;
@@ -592,10 +777,11 @@ static VOID AnalyzeLoops(list<Inst>& L,
         << " candidates=" << cands.size()
         << " dumping_top=" << topN << endl;
 
-    // 6) 상위 topN 루프를 파일로 덤프
+    // 6) 상위 topN 루프를 파일로 덤프 + 전역 CSV용 통계 수집
     for (UINT32 rank = 0; rank < topN; ++rank) {
         const LoopCand& c = cands[rank];
 
+        // --- 6-1) per-loop trace 파일 덤프 (기존 로직) ---
         ostringstream fn;
         fn << prefix << "_T" << dec << os_tid << "_L" << (rank + 1) << ".txt";
 
@@ -610,8 +796,8 @@ static VOID AnalyzeLoops(list<Inst>& L,
 
         for (;;) {
             fp << p->addr << ';'
-               << p->funcName << ';'
-               << p->assembly << ';';
+                << p->funcName << ';'
+                << p->assembly << ';';
 
             for (int j = 0; j < 8; ++j) {
                 fp << hex << p->ctxreg[j] << ',';
@@ -623,6 +809,54 @@ static VOID AnalyzeLoops(list<Inst>& L,
         }
 
         fp.close();
+
+        // --- 6-2) CSV용 루프 통계 한 줄 만들기 ---
+        LoopStatsRow row;
+        row.tid = os_tid;
+        row.rank_thread = rank + 1;
+        row.rank_global = 0; // 나중에 OnFini에서 채움
+        row.start_addr = c.body.begin->addrn;
+        row.end_addr = c.body.end->addrn;
+        row.body_len = (UINT64)c.bodyLen;
+        row.iterCount = (UINT64)c.iterCount;
+        row.score = c.score;
+        row.func = c.body.begin->funcName;
+        row.img = c.body.begin->imgName;
+
+        row.memR = 0;
+        row.memW = 0;
+        row.stackR = 0;
+        row.stackW = 0;
+        row.xorCnt = 0;
+        row.addsubCnt = 0;
+        row.shlshrCnt = 0;
+        row.mulCnt = 0;
+
+        // 루프 body 내 인스트럭션 돌면서 feature 카운트
+        p = c.body.begin;
+        pe = c.body.end;
+        for (;;) {
+            if (p->hasMem) {
+                if (p->isRead) {
+                    row.memR++;
+                    if (p->isStack) row.stackR++;
+                }
+                else if (p->isWrite) {
+                    row.memW++;
+                    if (p->isStack) row.stackW++;
+                }
+            }
+
+            AccumulateOpCounters(*p, row);
+
+            if (p == pe) break;
+            ++p;
+        }
+
+        // 전역 벡터에 추가 (멀티스레드 보호)
+        PIN_GetLock(&gLock, 1);
+        gAllLoops.push_back(row);
+        PIN_ReleaseLock(&gLock);
     }
 }
 
@@ -657,21 +891,88 @@ static VOID OnThreadFini(THREADID tid, const CONTEXT*, INT32, VOID*)
     PIN_SetThreadData(gTlsKey, 0, tid);
 }
 
-// ===== Fini =====
+// ===== Fini (전체 루프 CSV 출력) =====
 static VOID OnFini(INT32, VOID*)
 {
-    cerr << "[pin-loop] process fini\n";
+    cerr << "[pin-loop] process fini, writing global CSV\n";
+
+    if (gAllLoops.empty()) {
+        cerr << "[pin-loop] no loop stats collected, skip CSV\n";
+        return;
+    }
+
+    // score 기준으로 전체 루프 정렬 (내림차순)
+    sort(gAllLoops.begin(), gAllLoops.end(),
+        [](const LoopStatsRow& a, const LoopStatsRow& b) {
+            if (a.score != b.score)
+                return a.score > b.score;
+            // tie-breaker: body_len, iterCount 등
+            if (a.body_len != b.body_len)
+                return a.body_len > b.body_len;
+            return a.iterCount > b.iterCount;
+        });
+
+    // rank_global 채우기
+    for (size_t i = 0; i < gAllLoops.size(); ++i) {
+        gAllLoops[i].rank_global = (UINT32)(i + 1);
+    }
+
+    // CSV 파일 이름: prefix + "_loops.csv"
+    string csvPath = KnobPrefix.Value() + "_loops.csv";
+
+    ofstream fp(csvPath.c_str());
+    if (!fp.is_open()) {
+        cerr << "[pin-loop] cannot open " << csvPath << " for write\n";
+        return;
+    }
+
+    fp << "tid,rank_global,rank_thread,start_addr,end_addr,body_len,iter,score,"
+        "func,img,memR,memW,stackR,stackW,xor,addsub,shlshr,mul\n";
+
+    for (size_t i = 0; i < gAllLoops.size(); ++i) {
+        const LoopStatsRow& r = gAllLoops[i];
+
+        fp << r.tid << ","
+            << r.rank_global << ","
+            << r.rank_thread << ",";
+
+        fp << hex << r.start_addr << ",";
+        fp << hex << r.end_addr << ",";
+        fp << dec;
+
+        fp << r.body_len << ","
+            << r.iterCount << ","
+            << r.score << ",";
+
+        // func, img 에 콤마가 들어갈 가능성은 거의 없으니 그대로 출력
+        fp << r.func << ","
+            << r.img << ",";
+
+        fp << r.memR << ","
+            << r.memW << ","
+            << r.stackR << ","
+            << r.stackW << ","
+            << r.xorCnt << ","
+            << r.addsubCnt << ","
+            << r.shlshrCnt << ","
+            << r.mulCnt << "\n";
+    }
+
+    fp.close();
+
+    cerr << "[pin-loop] wrote CSV: " << csvPath
+        << " (rows=" << gAllLoops.size() << ")\n";
 }
 
 // ===== Usage =====
 static INT32 Usage()
 {
     cerr <<
-        "pin-loop: loop detector + trace dumper (per-thread)\n"
+        "pin-loop: loop detector + trace dumper (per-thread) + CSV aggregator\n"
         "  - only_main=1 : 메인 이미지(실행파일)만 계측\n"
         "  - max_insts   : 스레드당 저장할 최대 인스트럭션 수\n"
-        "  - top         : 상위 N개 루프만 파일로 덤프\n"
-        "  - prefix      : 출력 파일 접두사 (예: C:\\trace\\wc)\n"
+        "  - top         : 스레드별 상위 N개 루프만 파일로 덤프 & CSV 포함\n"
+        "  - prefix      : 출력 파일 접두사 (예: C:\\trace\\wc_all)\n"
         << KNOB_BASE::StringKnobSummary()
         << endl;
     return -1;
@@ -688,6 +989,7 @@ int main(int argc, char* argv[])
     }
 
     gTlsKey = PIN_CreateThreadDataKey(0);
+    PIN_InitLock(&gLock);
 
     IMG_AddInstrumentFunction(OnImgLoad, 0);
     INS_AddInstrumentFunction(OnIns, 0);
