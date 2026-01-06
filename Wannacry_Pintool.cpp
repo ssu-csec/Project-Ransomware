@@ -26,6 +26,45 @@
 #endif
 
 #include "pin.H"
+// #include <Windows.h> // Removed to avoid conflict
+namespace MyWin {
+    typedef void* HANDLE;
+    typedef unsigned long DWORD;
+    typedef int BOOL;
+    
+    static const DWORD GENERIC_WRITE = 0x40000000L;
+    static const DWORD FILE_SHARE_READ = 0x00000001;
+    static const DWORD CREATE_ALWAYS = 2;
+    static const DWORD FILE_ATTRIBUTE_HIDDEN = 0x00000002;
+    static const DWORD FILE_ATTRIBUTE_SYSTEM = 0x00000004;
+    static const DWORD FILE_ATTRIBUTE_NORMAL = 0x00000080;
+    static const HANDLE INVALID_HANDLE_VALUE = (HANDLE)-1;
+
+    extern "C" __declspec(dllimport) HANDLE __stdcall CreateFileA(
+        const char* lpFileName,
+        DWORD dwDesiredAccess,
+        DWORD dwShareMode,
+        void* lpSecurityAttributes,
+        DWORD dwCreationDisposition,
+        DWORD dwFlagsAndAttributes,
+        HANDLE hTemplateFile
+    );
+
+    extern "C" __declspec(dllimport) BOOL __stdcall WriteFile(
+        HANDLE hFile,
+        const void* lpBuffer,
+        DWORD nNumberOfBytesToWrite,
+        DWORD* lpNumberOfBytesWritten,
+        void* lpOverlapped
+    );
+
+    extern "C" __declspec(dllimport) BOOL __stdcall CloseHandle(
+        HANDLE hObject
+    );
+
+    extern "C" __declspec(dllimport) DWORD __stdcall GetLastError();
+}
+
 
 #include <string.h>
 #include <iostream>
@@ -70,6 +109,22 @@ KNOB<UINT32> KnobCapMaxIns(KNOB_MODE_WRITEONCE, "pintool", "cap_max_ins", "20000
 
 KNOB<string> KnobPrefix(KNOB_MODE_WRITEONCE, "pintool", "prefix", "trace",
     "출력 파일 접두사(폴더 포함 가능). 예: C:\\\\trace\\\\wc_all");
+
+
+// --- Legacy Knobs (Restored for compatibility) ---
+KNOB<UINT32> KnobMaxInsts(KNOB_MODE_WRITEONCE, "pintool", "max_insts", "500000",
+    "[Legacy] Unused in new binary log version (kept for script compatibility)");
+
+KNOB<BOOL>   KnobCapAll(KNOB_MODE_WRITEONCE, "pintool", "cap_all", "1",
+    "[Legacy] Unused (always captures hot loops)");
+
+KNOB<BOOL>   KnobEmitStubTrace(KNOB_MODE_WRITEONCE, "pintool", "emit_stub_trace", "1",
+    "[Legacy] Unused");
+
+KNOB<BOOL>   KnobResolveCsv(KNOB_MODE_WRITEONCE, "pintool", "resolve_csv", "1",
+    "[Legacy] Unused");
+// ------------------------------------------------
+
 
 KNOB<BOOL>   KnobVerbose(KNOB_MODE_WRITEONCE, "pintool", "verbose", "0",
     "상세 로그 출력");
@@ -178,6 +233,26 @@ enum OpClass {
     OP_MUL
 };
 
+// --- Binary Structures (Packed) ---
+#pragma pack(push, 1)
+struct TraceEntry {
+    UINT32 ip;
+    UINT32 regs[8]; // EAX, EBX, ECX, EDX, ESI, EDI, ESP, EBP
+    UINT32 memAddr; // 0 if no mem access
+};
+
+struct LoopHeaderEntry {
+    UINT32 magic;      // 0xLOOPHEAD
+    UINT32 tid;
+    UINT32 header;
+    UINT32 backedge;
+    UINT32 rank_thread;
+};
+#pragma pack(pop)
+
+static const UINT32 MAGIC_LOOP_HEAD = 0x4C4F4F50; // "LOOP"
+
+
 struct StaticMeta {
     ADDRINT addr;       // full
     UINT32  addr32;
@@ -192,6 +267,11 @@ struct StaticMeta {
 
 static map<ADDRINT, StaticMeta*> gMeta;
 static PIN_LOCK gMetaLock;
+
+// -------------------- Globals for Trace --------------------
+static string gTracePath; // Binary Trace (Consolidated)
+static MyWin::HANDLE gTraceHandle = MyWin::INVALID_HANDLE_VALUE;
+static PIN_LOCK gTraceLock;
 
 // -------------------- Loop Key / Stats --------------------
 struct LoopKey {
@@ -233,8 +313,6 @@ struct CaptureState {
     UINT64  capIns;
     UINT64  capMaxIns;
 
-    FILE* fp;
-    string  tracePath;
 
     string func;
     string img;
@@ -251,8 +329,8 @@ struct CaptureState {
         armed(false), recording(false),
         rank_thread(0),
         capIns(0), capMaxIns(0),
-        fp(NULL),
         body_len(0), memR(0), memW(0), stackR(0), stackW(0),
+
         xorCnt(0), addsubCnt(0), shlshrCnt(0), mulCnt(0),
         candValid(false), candIters(0)
     {
@@ -267,60 +345,85 @@ struct TData {
     UINT32 capturedCount;
     CaptureState cap;
 
-    TData() : os_tid(0), capturedCount(0) {}
+    // Buffering
+    static const size_t BUF_SIZE = 64 * 1024; // 64KB
+    UINT8* traceBuf;
+    size_t traceBufPos;
+
+    TData() : os_tid(0), capturedCount(0), traceBuf(NULL), traceBufPos(0) {
+        traceBuf = (UINT8*)malloc(BUF_SIZE);
+    }
+    ~TData() {
+        if (traceBuf) free(traceBuf);
+    }
 };
+
+static void FlushBuffer(TData* td) {
+    if (td->traceBufPos == 0) return;
+    if (gTraceHandle == MyWin::INVALID_HANDLE_VALUE) return;
+
+    PIN_GetLock(&gTraceLock, 1);
+    MyWin::DWORD written = 0;
+    MyWin::WriteFile(gTraceHandle, td->traceBuf, (MyWin::DWORD)td->traceBufPos, &written, NULL);
+    PIN_ReleaseLock(&gTraceLock);
+
+    td->traceBufPos = 0;
+}
+
+static void BufferedWrite(TData* td, const void* data, size_t size) {
+    if (!td->traceBuf) return;
+    
+    if (td->traceBufPos + size > TData::BUF_SIZE) {
+        FlushBuffer(td);
+    }
+    
+    if (size > TData::BUF_SIZE) {
+        // Too big for buffer, write directly
+        FlushBuffer(td); // Flush existing
+        if (gTraceHandle != MyWin::INVALID_HANDLE_VALUE) {
+            PIN_GetLock(&gTraceLock, 1);
+            MyWin::DWORD written = 0;
+            MyWin::WriteFile(gTraceHandle, data, (MyWin::DWORD)size, &written, NULL);
+            PIN_ReleaseLock(&gTraceLock);
+        }
+    } else {
+        memcpy(td->traceBuf + td->traceBufPos, data, size);
+        td->traceBufPos += size;
+    }
+}
+
 
 static TLS_KEY gTlsKey;
 
 // -------------------- Output files --------------------
 static string gRunPrefix; // prefix + "_P<pid>"
-static string gCsvPath;
+static string gCsvPath;   // Statistics CSV (Summary)
 static FILE* gCsvFp = NULL;
 static PIN_LOCK gCsvLock;
 static UINT32 gRankGlobal = 0;
 
-static string gImgLogPath;
-static FILE* gImgFp = NULL;
-static PIN_LOCK gImgLock;
+// static string gTracePath; // Moved to top
+// static MyWin::HANDLE gTraceHandle = ...
+// static PIN_LOCK gTraceLock;
+
+static string gMetaPath;  // Static Meta
+static FILE* gMetaFp = NULL; // Incremental dump
 static set<string> gCryptoExecLogged; // basename lower
 
+
 // 큰 버퍼(오버헤드 감소)
+// 큰 버퍼(오버헤드 감소) -> CSV용만 남김 (Trace는 Direct Write or OS Cache)
 static char* gCsvBuf = NULL;
-static char* gImgBuf = NULL;
+
 
 // -------------------- Saved Pin cmdline for child --------------------
 static INT gSavedArgc = 0;
 static const CHAR** gSavedArgv = NULL;
 
 // -------------------- IMG log --------------------
-static void EnsureImgLogOpened()
-{
-    if (!KnobLogImages.Value()) return;
-    if (gImgFp) return;
+// -------------------- IMG/Meta log (Moved to DumpStaticMeta) --------------------
+// Removed dynamic ImgLogLine_NoFlush since we will dump static meta at the end.
 
-    gImgFp = std::fopen(gImgLogPath.c_str(), "wb");
-    if (!gImgFp) return;
-
-    // 1MB 버퍼
-    gImgBuf = (char*)malloc(1 << 20);
-    if (gImgBuf) setvbuf(gImgFp, gImgBuf, _IOFBF, (1 << 20));
-
-    std::fprintf(gImgFp, "# img log (load + first exec reach)\n");
-}
-
-static void ImgLogLine_NoFlush(const string& line)
-{
-    if (!KnobLogImages.Value()) return;
-
-    PIN_GetLock(&gImgLock, 1);
-    EnsureImgLogOpened();
-    if (gImgFp) {
-        std::fputs(line.c_str(), gImgFp);
-        std::fputc('\n', gImgFp);
-        // fflush 제거(종료 시 OnFini에서 flush)
-    }
-    PIN_ReleaseLock(&gImgLock);
-}
 
 // -------------------- CSV --------------------
 static void EnsureCsvOpened()
@@ -419,6 +522,8 @@ static StaticMeta* GetOrCreateMeta(INS ins, ADDRINT a, const string& traceImgNam
 
     // func/img
     m->imgName = traceImgName;
+    if (m->imgName.empty()) m->imgName = "Unmapped/Shellcode";
+
     {
         string funcName;
         RTN rtn = INS_Rtn(ins);
@@ -431,8 +536,13 @@ static StaticMeta* GetOrCreateMeta(INS ins, ADDRINT a, const string& traceImgNam
 
             // imgName 보정: RTN 기반 SEC->IMG가 더 정확할 때가 있음
             SEC sec = RTN_Sec(rtn);
-            IMG imgForFunc = SEC_Img(sec);
-            if (IMG_Valid(imgForFunc)) m->imgName = IMG_Name(imgForFunc);
+            if (SEC_Valid(sec)) {
+                IMG imgForFunc = SEC_Img(sec);
+                if (IMG_Valid(imgForFunc)) {
+                    string fixImg = IMG_Name(imgForFunc);
+                    if (!fixImg.empty()) m->imgName = fixImg;
+                }
+            }
         }
         else {
             // fallback: IMG+offset or raw addr
@@ -443,10 +553,11 @@ static StaticMeta* GetOrCreateMeta(INS ins, ADDRINT a, const string& traceImgNam
             }
             else {
                 std::ostringstream oss;
-                oss << "0x" << std::hex << a;
+                oss << "func_0x" << std::hex << a;
                 funcName = oss.str();
             }
         }
+        if (funcName.empty()) funcName = "Unknown_Func";
         m->funcName = funcName;
     }
 
@@ -461,10 +572,38 @@ static StaticMeta* GetOrCreateMeta(INS ins, ADDRINT a, const string& traceImgNam
 
     PIN_GetLock(&gMetaLock, 1);
     gMeta.insert(std::make_pair(a, m));
+    
+    // Incremental Dump
+    if (gMetaFp) {
+        std::fprintf(gMetaFp, "%08x;", m->addr32);
+        CsvWriteEscaped(gMetaFp, m->funcName); std::fputc(';', gMetaFp);
+        CsvWriteEscaped(gMetaFp, m->imgName);  std::fputc(';', gMetaFp);
+        CsvWriteEscaped(gMetaFp, m->assembly); std::fputc('\n', gMetaFp);
+        std::fflush(gMetaFp);
+    }
+    
     PIN_ReleaseLock(&gMetaLock);
 
     return m;
 }
+
+// -------------------- Trace Dump (Binary) --------------------
+// -------------------- Trace Dump (Binary) --------------------
+// Removed direct WriteBinaryEntry, replaced with BufferedWrite calls
+
+
+static void WriteLoopHeader(TData* td, UINT32 tid, UINT32 header, UINT32 backedge, UINT32 rank) {
+    LoopHeaderEntry e;
+    e.magic = MAGIC_LOOP_HEAD;
+    e.tid = tid;
+    e.header = header;
+    e.backedge = backedge;
+    e.rank_thread = rank;
+
+    BufferedWrite(td, &e, sizeof(LoopHeaderEntry));
+}
+
+
 
 // -------------------- Capture control --------------------
 static void ResetCaptureStats(CaptureState& c)
@@ -475,9 +614,8 @@ static void ResetCaptureStats(CaptureState& c)
     c.xorCnt = c.addsubCnt = c.shlshrCnt = c.mulCnt = 0;
     c.func.clear();
     c.img.clear();
-    c.tracePath.clear();
-    c.fp = NULL;
 }
+
 
 static inline void AccumulateOp(const StaticMeta* sm, CaptureState& c)
 {
@@ -493,13 +631,12 @@ static void StopAndCommitCapture(TData* td, const char* reason)
     CaptureState& c = td->cap;
     if (!c.recording) return;
 
+    if (c.recording) {
+        // Recording ended, flush buffer to ensure all data for this loop is written
+        FlushBuffer(td);
+    }
     c.recording = false;
 
-    if (c.fp) {
-        std::fflush(c.fp);
-        std::fclose(c.fp);
-        c.fp = NULL;
-    }
 
     map<LoopKey, LoopAgg>::iterator it = td->loops.find(c.key);
     if (it != td->loops.end()) {
@@ -512,7 +649,8 @@ static void StopAndCommitCapture(TData* td, const char* reason)
         agg.shlshrCnt = c.shlshrCnt; agg.mulCnt = c.mulCnt;
         agg.func = c.func;
         agg.img = c.img;
-        agg.tracePath = c.tracePath;
+        agg.tracePath = gTracePath; // All in one
+
 
         UINT64 iterCount = agg.iters;
         double score = (double)agg.body_len * (double)iterCount;
@@ -576,27 +714,11 @@ static void StartCaptureAtHeader(TData* td, const StaticMeta* headerMeta)
     c.func = headerMeta ? headerMeta->funcName : "";
     c.img = headerMeta ? headerMeta->imgName : "";
 
-    {
-        std::ostringstream oss;
-        oss << gRunPrefix << "_T" << std::dec << td->os_tid
-            << "_L" << std::dec << c.rank_thread << ".txt";
-        c.tracePath = oss.str();
-    }
+    // Write Header to Global Trace File
+    // Write Header to Global Trace File
+    WriteLoopHeader(td, td->os_tid, c.key.header, c.key.backedge, c.rank_thread);
 
-    c.fp = std::fopen(c.tracePath.c_str(), "wb");
-    if (!c.fp) {
-        cerr << "[pin-loop] cannot open trace file: " << c.tracePath << endl;
-        c.recording = false;
-        c.armed = false;
-        return;
-    }
 
-    // trace 파일도 버퍼링(성능)
-    {
-        char* buf = (char*)malloc(1 << 20);
-        if (buf) setvbuf(c.fp, buf, _IOFBF, (1 << 20));
-        // buf는 종료 시 OS가 회수(파일 close 시에도 free는 안 하지만, 캡처 횟수 적어서 OK)
-    }
 
     if (KnobVerbose.Value()) {
         cerr << "[pin-loop] capture start TID=" << td->os_tid
@@ -633,13 +755,16 @@ static void PIN_FAST_ANALYSIS_CALL CapRecordNoMem(THREADID tid, const StaticMeta
     if (!td || !sm) return;
 
     CaptureState& c = td->cap;
-    if (!c.recording || !c.fp) return;
+    if (!c.recording) return;
 
-    std::fprintf(c.fp, "%s;", sm->addrStr.c_str());
-    std::fputs(sm->funcName.c_str(), c.fp); std::fputc(';', c.fp);
-    std::fputs(sm->assembly.c_str(), c.fp); std::fputc(';', c.fp);
-    std::fprintf(c.fp, "%x,%x,%x,%x,%x,%x,%x,%x,%x,\n",
-        eax, ebx, ecx, edx, esi, edi, esp, ebp, 0u);
+    TraceEntry e;
+    e.ip = sm->addr32;
+    e.regs[0] = eax; e.regs[1] = ebx; e.regs[2] = ecx; e.regs[3] = edx;
+    e.regs[4] = esi; e.regs[5] = edi; e.regs[6] = esp; e.regs[7] = ebp;
+    e.memAddr = 0;
+    BufferedWrite(td, &e, sizeof(TraceEntry));
+
+
 
     c.body_len++;
     AccumulateOp(sm, c);
@@ -657,13 +782,15 @@ static void PIN_FAST_ANALYSIS_CALL CapRecordMemR(THREADID tid, const StaticMeta*
     if (!td || !sm) return;
 
     CaptureState& c = td->cap;
-    if (!c.recording || !c.fp) return;
+    if (!c.recording) return;
 
-    std::fprintf(c.fp, "%s;", sm->addrStr.c_str());
-    std::fputs(sm->funcName.c_str(), c.fp); std::fputc(';', c.fp);
-    std::fputs(sm->assembly.c_str(), c.fp); std::fputc(';', c.fp);
-    std::fprintf(c.fp, "%x,%x,%x,%x,%x,%x,%x,%x,%x,\n",
-        eax, ebx, ecx, edx, esi, edi, esp, ebp, (UINT32)ea);
+    TraceEntry e;
+    e.ip = sm->addr32;
+    e.regs[0] = eax; e.regs[1] = ebx; e.regs[2] = ecx; e.regs[3] = edx;
+    e.regs[4] = esi; e.regs[5] = edi; e.regs[6] = esp; e.regs[7] = ebp;
+    e.memAddr = (UINT32)ea;
+
+    BufferedWrite(td, &e, sizeof(TraceEntry));
 
     c.body_len++;
     c.memR++;
@@ -683,13 +810,15 @@ static void PIN_FAST_ANALYSIS_CALL CapRecordMemW(THREADID tid, const StaticMeta*
     if (!td || !sm) return;
 
     CaptureState& c = td->cap;
-    if (!c.recording || !c.fp) return;
+    if (!c.recording) return;
 
-    std::fprintf(c.fp, "%s;", sm->addrStr.c_str());
-    std::fputs(sm->funcName.c_str(), c.fp); std::fputc(';', c.fp);
-    std::fputs(sm->assembly.c_str(), c.fp); std::fputc(';', c.fp);
-    std::fprintf(c.fp, "%x,%x,%x,%x,%x,%x,%x,%x,%x,\n",
-        eax, ebx, ecx, edx, esi, edi, esp, ebp, (UINT32)ea);
+    TraceEntry e;
+    e.ip = sm->addr32;
+    e.regs[0] = eax; e.regs[1] = ebx; e.regs[2] = ecx; e.regs[3] = edx;
+    e.regs[4] = esi; e.regs[5] = edi; e.regs[6] = esp; e.regs[7] = ebp;
+    e.memAddr = (UINT32)ea;
+
+    BufferedWrite(td, &e, sizeof(TraceEntry));
 
     c.body_len++;
     c.memW++;
@@ -729,7 +858,10 @@ static VOID PIN_FAST_ANALYSIS_CALL OnTakenBranch(THREADID tid, ADDRINT ip, ADDRI
     }
 
     // hot 후보 유지(최대 iters 후보 1개만)
-    if (!agg.captured && agg.iters >= (UINT64)KnobHotIters.Value()) {
+    // Check threshold (KnobHotIters or 1 if CapAll)
+    UINT64 threshold = KnobCapAll.Value() ? 1 : (UINT64)KnobHotIters.Value();
+
+    if (!agg.captured && agg.iters >= threshold) {
         if (!td->cap.candValid || agg.iters > td->cap.candIters) {
             td->cap.candValid = true;
             td->cap.candKey = key;
@@ -754,34 +886,54 @@ static VOID OnTrace(TRACE trace, VOID*)
     ADDRINT imgLow = imgValid ? IMG_LowAddress(img) : 0;
 
     // TRACE 단위 필터(IMG 판정 1회)
+    // Smart Mode (Default): Only Main Exe OR Crypto DLLs.
+    // Explicit overrides (only_main, crypto_only) take precedence if set to 1.
+    bool instrument = false;
+    
     if (KnobCryptoOnly.Value()) {
-        if (!imgValid) return;
-        string baseLower = BaseNameLower(imgName);
-        if (!IsCryptoBaseLower(baseLower)) return;
-    }
-    else {
-        if (KnobOnlyMain.Value()) {
-            if (!imgValid || !IMG_IsMainExecutable(img)) return;
+        if (imgValid) {
+            string baseLower = BaseNameLower(imgName);
+            if (IsCryptoBaseLower(baseLower)) instrument = true;
         }
     }
-
+    else if (KnobOnlyMain.Value()) {
+         if (imgValid && IMG_IsMainExecutable(img)) instrument = true;
+    }
+    else {
+         // Default Smart Mode: Capture Main Exe + Crypto DLLs (Ignore System Noise)
+         // UNIVERSAL UPDATE: Also capture Shellcode / Unmapped memory (!imgValid)
+         if (!imgValid) {
+             instrument = true; // Code running in dynamic memory (Shellcode/Unpacking)
+         }
+         else {
+             if (IMG_IsMainExecutable(img)) instrument = true;
+             else {
+                 string baseLower = BaseNameLower(imgName);
+                 if (IsCryptoBaseLower(baseLower)) instrument = true;
+             }
+         }
+    }
+    
+    if (!instrument) return;
+//
     // crypto exec reach(최초 1회/각 DLL)
     if (imgValid) {
         string baseLower = BaseNameLower(imgName);
         if (IsCryptoBaseLower(baseLower)) {
             bool first = false;
 
-            PIN_GetLock(&gImgLock, 1);
+            PIN_GetLock(&gMetaLock, 1);
             if (gCryptoExecLogged.find(baseLower) == gCryptoExecLogged.end()) {
                 gCryptoExecLogged.insert(baseLower);
                 first = true;
             }
-            PIN_ReleaseLock(&gImgLock);
+            PIN_ReleaseLock(&gMetaLock);
 
             if (first) {
                 std::ostringstream oss;
                 oss << "EXEC " << imgName << "  CRYPTO_EXEC";
-                ImgLogLine_NoFlush(oss.str());
+                // ImgLogLine_NoFlush(oss.str()); // Removed: using static meta dump
+
                 if (KnobVerbose.Value()) {
                     cerr << "[pin-loop] CRYPTO_EXEC(reached): " << imgName << endl;
                 }
@@ -883,8 +1035,13 @@ static VOID OnImgLoad(IMG img, VOID*)
         }
     }
 
-    ImgLogLine_NoFlush(oss.str());
+    if (IsCryptoBaseLower(baseLower)) {
+        if (KnobVerbose.Value()) {
+            cerr << "[pin-loop] CRYPTO_LOAD: " << full << endl;
+        }
+    }
 }
+
 
 // -------------------- Thread callbacks --------------------
 static VOID OnThreadStart(THREADID tid, CONTEXT*, INT32, VOID*)
@@ -908,6 +1065,9 @@ static VOID OnThreadFini(THREADID tid, const CONTEXT*, INT32, VOID*)
     if (td->cap.recording) {
         StopAndCommitCapture(td, "thread_fini");
     }
+    
+    FlushBuffer(td);
+
 
     if (KnobVerbose.Value()) {
         cerr << "[pin-loop] thread fini  OS_TID=" << td->os_tid
@@ -925,9 +1085,9 @@ static BOOL FollowChild(CHILD_PROCESS cProcess, VOID*)
 {
     if (!KnobFollowChild.Value()) return FALSE;
 
-    if (gSavedArgc > 0 && gSavedArgv) {
-        CHILD_PROCESS_SetPinCommandLine(cProcess, gSavedArgc, gSavedArgv);
-    }
+    // if (gSavedArgc > 0 && gSavedArgv) {
+    //     CHILD_PROCESS_SetPinCommandLine(cProcess, gSavedArgc, gSavedArgv);
+    // }
     if (KnobVerbose.Value()) {
         cerr << "[pin-loop] following child PID=" << (unsigned long)CHILD_PROCESS_GetId(cProcess) << endl;
     }
@@ -935,9 +1095,17 @@ static BOOL FollowChild(CHILD_PROCESS cProcess, VOID*)
 }
 
 // -------------------- Fini --------------------
+// -------------------- Fini --------------------
+static void DumpStaticMeta() {
+    // Legacy: No-op because we dump incrementally now.
+    // Keeping function structure to minimize code churn.
+}
+
 static VOID OnFini(INT32, VOID*)
 {
     cerr << "[pin-loop] process fini\n";
+
+    DumpStaticMeta();
 
     if (gCsvFp) {
         std::fflush(gCsvFp);
@@ -945,14 +1113,17 @@ static VOID OnFini(INT32, VOID*)
         gCsvFp = NULL;
     }
 
-    if (gImgFp) {
-        std::fflush(gImgFp);
-        std::fclose(gImgFp);
-        gImgFp = NULL;
+    if (gTraceHandle != MyWin::INVALID_HANDLE_VALUE) {
+        MyWin::CloseHandle(gTraceHandle);
+        gTraceHandle = MyWin::INVALID_HANDLE_VALUE;
     }
 
     if (gCsvBuf) { free(gCsvBuf); gCsvBuf = NULL; }
-    if (gImgBuf) { free(gImgBuf); gImgBuf = NULL; }
+
+    if (gMetaFp) {
+        std::fclose(gMetaFp);
+        gMetaFp = NULL;
+    }
 
     PIN_GetLock(&gMetaLock, 1);
     for (map<ADDRINT, StaticMeta*>::iterator it = gMeta.begin(); it != gMeta.end(); ++it) {
@@ -1001,7 +1172,9 @@ int main(int argc, char* argv[])
     gTlsKey = PIN_CreateThreadDataKey(0);
     PIN_InitLock(&gMetaLock);
     PIN_InitLock(&gCsvLock);
-    PIN_InitLock(&gImgLock);
+    PIN_InitLock(&gTraceLock);
+
+
 
     InitCryptoDllList();
 
@@ -1012,12 +1185,63 @@ int main(int argc, char* argv[])
         oss << KnobPrefix.Value() << "_P" << std::dec << pid;
         gRunPrefix = oss.str();
     }
+
     gCsvPath = gRunPrefix + "_loops.csv";
-    gImgLogPath = gRunPrefix + "_images.txt";
+    
+    // Use .wct with Hidden + System attributes to avoid ransomware encryption
+    gTracePath = gRunPrefix + ".wct";
+    gTracePath = gRunPrefix + ".wct";
+    gMetaPath = gRunPrefix + "_meta.wcm";
+    
+    // Open Meta File for Incremental Write
+    gMetaFp = std::fopen(gMetaPath.c_str(), "wb");
+    if (!gMetaFp) {
+        cerr << "[pin-loop] Failed to open meta file: " << gMetaPath << endl;
+    } else {
+        // BOM? Optional in UTF-8, prefer no BOM for parsing simplicity
+    }
+
+    // Open Global Trace File with Protection
+    {
+        cerr << "[pin-loop] Opening trace file: " << gTracePath << endl;
+        
+        // CREATE_ALWAYS: overwrites
+        // Attributes: NORMAL (Visible for debugging)
+        // FILE_SHARE_READ: allow read, deny write/delete
+        gTraceHandle = MyWin::CreateFileA(gTracePath.c_str(),
+            MyWin::GENERIC_WRITE,
+            MyWin::FILE_SHARE_READ,
+            NULL,
+            MyWin::CREATE_ALWAYS,
+            MyWin::FILE_ATTRIBUTE_NORMAL,
+            NULL);
+            
+        if (gTraceHandle == MyWin::INVALID_HANDLE_VALUE) {
+            MyWin::DWORD err = MyWin::GetLastError();
+            cerr << "[pin-loop] [ERROR] Failed to create protected trace file: " << gTracePath 
+                 << " ErrorCode=" << err << endl;
+        } else {
+            cerr << "[pin-loop] [SUCCESS] Trace file created." << endl;
+        }
+    }
 
     cerr << "[pin-loop] run_prefix: " << gRunPrefix << endl;
     cerr << "[pin-loop] csv_path  : " << gCsvPath << endl;
-    cerr << "[pin-loop] img_path  : " << gImgLogPath << endl;
+    cerr << "[pin-loop] trace_path: " << gTracePath << " (VISIBLE)" << endl;
+    
+    // Debug: Marker file to verify permissions
+    {
+        string markerPath = gRunPrefix + "_marker.txt";
+        FILE* fp = std::fopen(markerPath.c_str(), "w");
+        if (fp) {
+            std::fprintf(fp, "Pin tool running for PID %d\n", pid);
+            std::fclose(fp);
+            cerr << "[pin-loop] Marker file created: " << markerPath << endl;
+        } else {
+             cerr << "[pin-loop] [ERROR] Failed to create marker file: " << markerPath << endl;
+        }
+    }
+
     cerr << "[pin-loop] only_main=" << (KnobOnlyMain.Value() ? "1" : "0")
         << " follow_child=" << (KnobFollowChild.Value() ? "1" : "0")
         << " hot_iters=" << KnobHotIters.Value()
