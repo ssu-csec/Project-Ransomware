@@ -1,3 +1,0 @@
-C:\Users\user\AppData\Local\Temp\tmpb2vlhue2\wheel\platlib/./udmp_parser.cp313-win_amd64.pyd
-C:\Users\user\AppData\Local\Temp\tmpb2vlhue2\wheel\platlib/./udmp_parser-stubs/utils.pyi
-C:\Users\user\AppData\Local\Temp\tmpb2vlhue2\wheel\platlib/./udmp_parser-stubs/__init__.pyi

@@ -1,3 +1,0 @@
-TOOL_ROOTS = instracelog
-TARGET     = ia32
-include $(PIN_ROOT)\source\tools\makefile.win
