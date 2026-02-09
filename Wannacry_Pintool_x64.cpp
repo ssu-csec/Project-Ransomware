@@ -1,25 +1,21 @@
-// === MyPinTool.cpp (Fast Hot-Loop Capture + TRACE-level IMG filter, no dangling pointers) ===
-// Pin 3.31 / Windows / IA-32 / MSVC (C++03 compatible)
+// === MyPinTool.cpp (Fast Hot-Loop Capture + TRACE-level IMG filter) ===
+// Pin 3.31 / Windows / MSVC
 //
-// 핵심 유지 기능:
-//  - taken back-edge 기반 loop 카운트(스레드별)
-//  - hot_iters 이상 반복된 loop만 1 iteration 캡처(txt 생성)
-//  - 캡처 완료 시 CSV에 1줄 append
-//  - follow child 지원
-//  - crypto DLL load/exec reach 로깅(images.txt) 옵션
+// Core Features:
+//  - Taken back-edge based loop count (per-thread)
+//  - Capture 1 iteration of loops exceeding hot_iters
+//  - Append to CSV upon capture completion
+//  - Support follow child
+//  - Optional crypto DLL load/exec reach logging
 //
-// 최적화/안정화:
-//  - INS_AddInstrumentFunction 대신 TRACE_AddInstrumentFunction 사용: IMG 판정 1회/TRACE
-//  - IMG 로그는 버퍼링(매번 fflush 제거)
-//  - CRYPTO_EXEC 로깅도 TRACE 단위로 1회만(중복 최소)
-//  - rank_global을 전역 증가로 채움
+// Optimization:
+//  - Use TRACE_AddInstrumentFunction for single IMG check per TRACE
+//  - Buffered logging
 //
-// 출력:
-//  CSV 헤더(요구사항 그대로):
-//    tid,rank_global,rank_thread,start_addr,end_addr,body_len,iter,score,func,img,memR,memW,stackR,stackW,xor,addsub,shlshr,mul
+// Output:
+//  CSV Header: tid,rank_global,rank_thread,start_addr,end_addr,body_len,iter,score,func,img,memR,memW,stackR,stackW,xor,addsub,shlshr,mul
 //
-// 주의:
-//  - IA-32(32-bit) 타깃 전용 (WOW64 포함)
+// Note: Intel64 Only
 
 #ifdef _MSC_VER
 #  pragma warning(disable:5208)
@@ -127,26 +123,26 @@ using std::endl;
 #endif
 
 // -------------------- Knobs --------------------
-KNOB<BOOL>   KnobOnlyMain(KNOB_MODE_WRITEONCE, "pintool", "only_main", "1",
-    "메인 실행파일만 계측 (1이면 main exe만, 0이면 전체)");
+KNOB<BOOL>   KnobOnlyMain(KNOB_MODE_WRITEONCE, "pintool", "only_main", "0",
+    "Instrument only main executable (1=main only, 0=all)");
 
 KNOB<BOOL>   KnobInstrumentAll(KNOB_MODE_WRITEONCE, "pintool", "instrument_all", "0",
-    "모든 IMG(=전체 모듈) 계측. only_main/crypto_only보다 우선");
+    "Instrument all images (overrides only_main/crypto_only)");
 
 KNOB<BOOL>   KnobFollowChild(KNOB_MODE_WRITEONCE, "pintool", "follow_child", "1",
-    "자식 프로세스 follow (CreateProcess로 직접 spawn되는 child에 한함)");
+    "Follow child processes (spawned via CreateProcess)");
 
 KNOB<UINT32> KnobTop(KNOB_MODE_WRITEONCE, "pintool", "top", "50",
-    "스레드별 캡처할 hot loop 최대 개수");
+    "Max hot loops to capture per thread");
 
-KNOB<UINT32> KnobHotIters(KNOB_MODE_WRITEONCE, "pintool", "hot_iters", "2000",
-    "루프 반복 횟수가 이 값 이상이면 캡처 후보로 승격");
+KNOB<UINT32> KnobHotIters(KNOB_MODE_WRITEONCE, "pintool", "hot_iters", "20000",
+    "Minimum iterations to trigger capture (hot loop threshold)");
 
 KNOB<UINT32> KnobCapMaxIns(KNOB_MODE_WRITEONCE, "pintool", "cap_max_ins", "20000",
-    "루프 1 iteration 캡처 시 최대 인스트럭션 수");
+    "Max instructions to capture per loop iteration");
 
 KNOB<string> KnobPrefix(KNOB_MODE_WRITEONCE, "pintool", "prefix", "trace",
-    "출력 파일 접두사(폴더 포함 가능). 예: C:\\\\trace\\\\wc_all");
+    "Output file prefix (can include folder, e.g. C:\\trace\\wc_all");
 
 
 // --- Legacy Knobs (Restored for compatibility) ---
@@ -165,24 +161,24 @@ KNOB<BOOL>   KnobResolveCsv(KNOB_MODE_WRITEONCE, "pintool", "resolve_csv", "1",
 
 
 KNOB<BOOL>   KnobVerbose(KNOB_MODE_WRITEONCE, "pintool", "verbose", "0",
-    "상세 로그 출력");
+    "Enable verbose logging");
 
 // --- Crypto DLL load/exec reach test knobs ---
 KNOB<BOOL>   KnobLogImages(KNOB_MODE_WRITEONCE, "pintool", "log_images", "1",
-    "IMG 로드/실행 도달 로그(images.txt) 기록");
+    "Log IMG load/exec reach to images.txt");
 
 KNOB<BOOL>   KnobCryptoOnly(KNOB_MODE_WRITEONCE, "pintool", "crypto_only", "0",
-    "암호화 관련 DLL만 계측(테스트용)");
+    "Instrument only crypto DLLs (for testing)");
 
 KNOB<string> KnobCryptoDlls(KNOB_MODE_WRITEONCE, "pintool", "crypto_dlls",
     "cryptbase.dll;bcrypt.dll;bcryptprimitives.dll;crypt32.dll;ncrypt.dll;ncryptprov.dll;rsaenh.dll;dssenh.dll;schannel.dll;secur32.dll",
-    "crypto DLL basename 목록(;로 구분)");
+    "List of crypto DLL basenames (semicolon separated)");
 
 KNOB<BOOL>   KnobLogMeta(KNOB_MODE_WRITEONCE, "pintool", "log_meta", "1",
-    "Meta(asm/img/name) 로깅 활성화 (0이면 성능 최적화를 위해 끔)");
+    "Enable Metadata logging (asm/img/name)");
 
 KNOB<UINT32> KnobMaxBackedgeDist(KNOB_MODE_WRITEONCE, "pintool", "max_backedge_dist", "2097152",
-    "루프 탐지 시 백엣지 거리 제한 (언패킹/VM등 분석 시 크게 설정)");
+    "Max backedge distance for loop detection");
 
 // -------------------- Utils --------------------
 static string ToLowerStr(const string& s)
@@ -253,17 +249,17 @@ static void SplitSemicolonLower(const string& s, vector<string>& out)
 }
 
 // -------------------- Crypto list --------------------
-static vector<string> gCryptoDllList;
+static vector<string>* gCryptoDllList = NULL;
 
 static void InitCryptoDllList()
 {
-    SplitSemicolonLower(KnobCryptoDlls.Value(), gCryptoDllList);
+    SplitSemicolonLower(KnobCryptoDlls.Value(), *gCryptoDllList);
 }
 
 static bool IsCryptoBaseLower(const string& baseLower)
 {
-    for (size_t i = 0; i < gCryptoDllList.size(); ++i) {
-        if (baseLower == gCryptoDllList[i]) return true;
+    for (size_t i = 0; i < gCryptoDllList->size(); ++i) {
+        if (baseLower == (*gCryptoDllList)[i]) return true;
     }
     return false;
 }
@@ -279,31 +275,6 @@ enum OpClass {
 
 // --- Binary Structures (Packed) ---
 #pragma pack(push, 1)
-struct TraceEntry {
-    ADDRINT ip;
-    ADDRINT regs[8]; // RAX, RBX, ... RBP
-    ADDRINT memAddr; // 0 if no mem access
-};
-
-// -------------------- Globals --------------------
-static FILE* gTraceFp = NULL;
-static FILE* gMetaFp = NULL;
-static PIN_LOCK gMetaLock;
-static PIN_LOCK gTraceLock;
-
-// Using PIN_LOCK for simple atomic counter simulation or just use locked increment
-static PIN_LOCK gGlobalSeqLock;
-static UINT64 gGlobalLoopSeq = 0; // First-seen sequence (Changed to UINT64)
-
-// Map to store FirstSeenSeq for each loop key (Header+BackEdge) to avoid re-assigning
-// This fixes the "All GlobalSeq=0" issue or unstable sequencing.
-static PIN_LOCK gFirstSeenLock;
-static map<pair<ADDRINT, ADDRINT>, UINT32> gLoopFirstSeen;
-
-// Structs
-// Loop Header Marker
-#define MAGIC_LOOP_HEAD 0x4C4F4F50 // "LOOP"
-
 struct LoopHeaderEntry {
     UINT32 magic;    // MAGIC_LOOP_HEAD
     UINT32 tid;      // Thread ID
@@ -328,14 +299,23 @@ struct StaticMeta {
     bool    isStackMem;
 };
 
-static map<ADDRINT, StaticMeta*> gMeta;
-// static PIN_LOCK gMetaLock; // Defined in block at line ~266
+static PIN_LOCK gGlobalSeqLock;
+static UINT64 gGlobalLoopSeq = 0;
+static PIN_LOCK gFirstSeenLock;
+static map<pair<ADDRINT, ADDRINT>, UINT32>* gLoopFirstSeen = NULL;
 
-// -------------------- Globals for Trace --------------------
-// -------------------- Globals for Trace --------------------
-static string gTracePath; // Binary Trace (Consolidated)
+static map<ADDRINT, StaticMeta*>* gMeta = NULL;
+static PIN_LOCK gMetaLock;
+
+// -------------------- Globals for I/O Log --------------------
+static FILE* gMetaFp = NULL;
+static FILE* gIoFp = NULL;
+static PIN_LOCK gIoLock;
+
+// -------------------- Trace Dump (Text) --------------------
+static string* gTracePath = NULL; // Text Trace
 static MyWin::HANDLE gTraceHandle = MyWin::INVALID_HANDLE_VALUE;
-// static PIN_LOCK gTraceLock; // Defined in block at line ~266
+static PIN_LOCK gTraceLock;
 
 // -------------------- Loop Key / Stats --------------------
 struct LoopKey {
@@ -411,15 +391,40 @@ struct TData {
     UINT32 capturedCount;
     CaptureState cap;
 
-    // Buffering - ATOMIC LOOP WRITE (Vector)
-    vector<UINT8> loopBuf;
+    // Buffering - Text Buffer
+    string loopBuf;
     
     TData() : os_tid(0), capturedCount(0) {
-        loopBuf.reserve(64 * 1024); // Reserve 64KB initially
+        loopBuf.reserve(64 * 1024); 
     }
     ~TData() {
     }
 };
+
+// Forward Declarations
+static TLS_KEY gTlsKey;
+static void StopAndCommitCapture(TData* td, const char* reason);
+// Moved OnRet execution to top to avoid scope issues
+static void PIN_FAST_ANALYSIS_CALL OnRet(THREADID tid)
+{
+    TData* td = (TData*)PIN_GetThreadData(gTlsKey, tid);
+    if (!td || !td->cap.recording) return;
+    
+    // Stop immediately on RET to prevent capturing unrelated code
+    StopAndCommitCapture(td, "ret_instruction");
+}
+static void ArmBestCandidateIfIdle(TData* td);
+static void AppendLoopRowToCsv(UINT32 tid,
+    UINT32 rank_global,
+    ADDRINT start_addr,
+    ADDRINT end_addr,
+    UINT64 body_len,
+    UINT64 iterCount,
+    double score,
+    const string& func,
+    const string& img,
+    UINT64 memR, UINT64 memW, UINT64 stackR, UINT64 stackW,
+    UINT64 xorCnt, UINT64 addsubCnt, UINT64 shlshrCnt, UINT64 mulCnt);
 
 static void FlushBuffer(TData* td) {
     if (td->loopBuf.empty()) return;
@@ -428,26 +433,23 @@ static void FlushBuffer(TData* td) {
     // ATOMIC WRITE protected by lock (Global File)
     PIN_GetLock(&gTraceLock, 1);
     MyWin::DWORD written = 0;
-    // C++03 vector fix: &td->loopBuf[0] instead of .data()
-    MyWin::WriteFile(gTraceHandle, &td->loopBuf[0], (MyWin::DWORD)td->loopBuf.size(), &written, NULL);
+    MyWin::WriteFile(gTraceHandle, td->loopBuf.c_str(), (MyWin::DWORD)td->loopBuf.size(), &written, NULL);
     PIN_ReleaseLock(&gTraceLock);
 
     td->loopBuf.clear();
 }
 
-static void BufferedWrite(TData* td, const void* data, size_t size) {
-    // Append to local vector
-    size_t oldSize = td->loopBuf.size();
-    td->loopBuf.resize(oldSize + size);
-    memcpy(&td->loopBuf[0] + oldSize, data, size);
+static void BufferedWriteText(TData* td, const string& s) {
+    td->loopBuf += s;
+    if (td->loopBuf.size() > 4096) FlushBuffer(td);
 }
 
 
-static TLS_KEY gTlsKey;
+
 
 // -------------------- Output files --------------------
-static string gRunPrefix; // prefix + "_P<pid>"
-static string gCsvPath;   // Statistics CSV (Summary)
+static string* gRunPrefix = NULL; // prefix + "_P<pid>"
+static string* gCsvPath = NULL;   // Statistics CSV (Summary)
 // static FILE* gCsvFp = NULL; // already static global? Re-check
 // static PIN_LOCK gCsvLock;   // already static global? Re-check
 // Wait, gCsvFp was not in the top block. Only gMetaFp was re-defined.
@@ -459,9 +461,9 @@ static PIN_LOCK gCsvLock;
 // static MyWin::HANDLE gTraceHandle = ...
 // static PIN_LOCK gTraceLock;
 
-static string gMetaPath;  // Static Meta
+static string* gMetaPath = NULL;  // Static Meta
 // static FILE* gMetaFp = NULL; // Redefined, remove this line.
-static set<string> gCryptoExecLogged; // basename lower
+static set<string>* gCryptoExecLogged = NULL; // basename lower
 
 
 // 큰 버퍼(오버헤드 감소)
@@ -482,9 +484,9 @@ static void EnsureCsvOpened()
 {
     if (gCsvFp) return;
 
-    gCsvFp = std::fopen(gCsvPath.c_str(), "wb");
+    gCsvFp = std::fopen(gCsvPath->c_str(), "wb");
     if (!gCsvFp) {
-        cerr << "[pin-loop] cannot open CSV: " << gCsvPath << endl;
+        cerr << "[pin-loop] cannot open CSV: " << *gCsvPath << endl;
         return;
     }
 
@@ -545,7 +547,7 @@ static void AppendLoopRowToCsv(UINT32 tid,
         (unsigned long long)xorCnt, (unsigned long long)addsubCnt,
         (unsigned long long)shlshrCnt, (unsigned long long)mulCnt);
 
-    // fflush removed
+    std::fflush(gCsvFp); // Ensure persistence even on crash
     PIN_ReleaseLock(&gCsvLock);
 }
 
@@ -556,8 +558,8 @@ static StaticMeta* GetOrCreateMeta(INS ins, ADDRINT a, const string& traceImgNam
     StaticMeta* sm = NULL;
 
     PIN_GetLock(&gMetaLock, 1);
-    map<ADDRINT, StaticMeta*>::iterator it = gMeta.find(a);
-    if (it != gMeta.end()) {
+    map<ADDRINT, StaticMeta*>::iterator it = gMeta->find(a);
+    if (it != gMeta->end()) {
         sm = it->second;
         PIN_ReleaseLock(&gMetaLock);
         return sm;
@@ -671,14 +673,14 @@ static StaticMeta* GetOrCreateMeta(INS ins, ADDRINT a, const string& traceImgNam
 
     PIN_GetLock(&gMetaLock, 1);
     // Double-check pattern to avoid race/dup/leak
-    map<ADDRINT, StaticMeta*>::iterator it2 = gMeta.find(a);
-    if (it2 != gMeta.end()) {
+    map<ADDRINT, StaticMeta*>::iterator it2 = gMeta->find(a);
+    if (it2 != gMeta->end()) {
         PIN_ReleaseLock(&gMetaLock);
         delete m; // Discard duplicate
         return it2->second;
     }
 
-    gMeta.insert(std::make_pair(a, m));
+    gMeta->insert(std::make_pair(a, m));
     
     // Incremental Dump (Buffered via stdio, NO Explicit Flush)
     if (gMetaFp && KnobLogMeta.Value()) {
@@ -688,6 +690,7 @@ static StaticMeta* GetOrCreateMeta(INS ins, ADDRINT a, const string& traceImgNam
         CsvWriteEscaped(gMetaFp, m->assembly); std::fputc(';', gMetaFp);
         CsvWriteEscaped(gMetaFp, m->memMeta);  std::fputc('\n', gMetaFp);
         // std::fflush(gMetaFp); // REMOVED for performance
+        std::fflush(gMetaFp);
     }
     
     PIN_ReleaseLock(&gMetaLock);
@@ -700,26 +703,15 @@ static StaticMeta* GetOrCreateMeta(INS ins, ADDRINT a, const string& traceImgNam
 // Removed direct WriteBinaryEntry, replaced with BufferedWrite calls
 
 
-static void WriteLoopHeader(TData* td, UINT32 tid, ADDRINT header, ADDRINT backedge, UINT32 rank) {
-
-    LoopHeaderEntry e;
-    e.magic = MAGIC_LOOP_HEAD;
-    e.tid = tid;
-    e.header = header;
-    e.backedge = backedge;
-    e.rank = rank;
-    
-    // Retrieve globalSeq from LoopAgg
-    // We need to look it up in td->loops
-    // Note: This adds a map lookup overhead during flush, but it's per LOOP, not per instruction.
+static void WriteLoopHeader(TData* td, UINT32 tid, UINT32 header, UINT32 backedge, UINT32 rank) {
+    // HEADER Format: LOOP,tid,header,backedge,rank,globalSeq
+    UINT32 gSeq = 0;
     LoopKey k; k.header = header; k.backedge = backedge;
-    if (td->loops.count(k)) {
-        e.globalSeq = td->loops[k].globalSeq;
-    } else {
-        e.globalSeq = 0; // Should not happen if logic is correct
-    }
+    if (td->loops.count(k)) gSeq = td->loops[k].globalSeq;
 
-    BufferedWrite(td, &e, sizeof(LoopHeaderEntry));
+    std::ostringstream oss;
+    oss << "LOOP," << tid << "," << std::hex << header << "," << backedge << "," << std::dec << rank << "," << gSeq << "\n";
+    BufferedWriteText(td, oss.str());
 }
 
 
@@ -768,14 +760,14 @@ static void StopAndCommitCapture(TData* td, const char* reason)
         agg.shlshrCnt = c.shlshrCnt; agg.mulCnt = c.mulCnt;
         agg.func = c.func;
         agg.img = c.img;
-        agg.tracePath = gTracePath; // All in one
+        agg.tracePath = *gTracePath; // All in one
 
 
         UINT64 iterCount = agg.iters;
         double score = (double)agg.body_len * (double)iterCount;
 
         AppendLoopRowToCsv(td->os_tid,
-            c.rank_thread,
+            agg.globalSeq, // FIXED: Pass GlobalSeq
             c.key.header,
             c.key.backedge,
             agg.body_len,
@@ -841,7 +833,7 @@ static void StartCaptureAtHeader(TData* td, const StaticMeta* headerMeta)
 
     // Write Header to Global Trace File
     // Write Header to Global Trace File
-    WriteLoopHeader(td, td->os_tid, c.key.header, c.key.backedge, c.rank_thread);
+    WriteLoopHeader(td, td->os_tid, (UINT32)c.key.header, (UINT32)c.key.backedge, c.rank_thread);
 
 
 
@@ -873,8 +865,10 @@ static ADDRINT PIN_FAST_ANALYSIS_CALL CapIf(THREADID tid, const StaticMeta* sm)
 }
 
 // -------------------- Record (THEN) --------------------
+// -------------------- Record (THEN) - Text --------------------
 static void PIN_FAST_ANALYSIS_CALL CapRecordNoMem(THREADID tid, const StaticMeta* sm,
-    UINT32 eax, UINT32 ebx, UINT32 ecx, UINT32 edx, UINT32 esi, UINT32 edi, UINT32 esp, UINT32 ebp)
+    ADDRINT eax, ADDRINT ebx, ADDRINT ecx, ADDRINT edx, ADDRINT esi, ADDRINT edi, ADDRINT esp, ADDRINT ebp,
+    ADDRINT r8, ADDRINT r9, ADDRINT r10, ADDRINT r11, ADDRINT r12, ADDRINT r13, ADDRINT r14, ADDRINT r15)
 {
     TData* td = (TData*)PIN_GetThreadData(gTlsKey, tid);
     if (!td || !sm) return;
@@ -882,14 +876,16 @@ static void PIN_FAST_ANALYSIS_CALL CapRecordNoMem(THREADID tid, const StaticMeta
     CaptureState& c = td->cap;
     if (!c.recording) return;
 
-    TraceEntry e;
-    e.ip = sm->addr32;
-    e.regs[0] = eax; e.regs[1] = ebx; e.regs[2] = ecx; e.regs[3] = edx;
-    e.regs[4] = esi; e.regs[5] = edi; e.regs[6] = esp; e.regs[7] = ebp;
-    e.memAddr = 0;
-    BufferedWrite(td, &e, sizeof(TraceEntry));
-
-
+    // Type,IP,MemAddr,EAX...
+    // x64 regs
+    char buf[512];
+    std::sprintf(buf, "I,%llx,0,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx\n",
+        (unsigned long long)sm->addr, 
+        (unsigned long long)eax, (unsigned long long)ebx, (unsigned long long)ecx, (unsigned long long)edx, 
+        (unsigned long long)esi, (unsigned long long)edi, (unsigned long long)esp, (unsigned long long)ebp,
+        (unsigned long long)r8, (unsigned long long)r9, (unsigned long long)r10, (unsigned long long)r11,
+        (unsigned long long)r12, (unsigned long long)r13, (unsigned long long)r14, (unsigned long long)r15);
+    BufferedWriteText(td, buf);
 
     c.body_len++;
     AccumulateOp(sm, c);
@@ -901,7 +897,8 @@ static void PIN_FAST_ANALYSIS_CALL CapRecordNoMem(THREADID tid, const StaticMeta
 }
 
 static void PIN_FAST_ANALYSIS_CALL CapRecordMemR(THREADID tid, const StaticMeta* sm, ADDRINT ea,
-    UINT32 eax, UINT32 ebx, UINT32 ecx, UINT32 edx, UINT32 esi, UINT32 edi, UINT32 esp, UINT32 ebp)
+    ADDRINT eax, ADDRINT ebx, ADDRINT ecx, ADDRINT edx, ADDRINT esi, ADDRINT edi, ADDRINT esp, ADDRINT ebp,
+    ADDRINT r8, ADDRINT r9, ADDRINT r10, ADDRINT r11, ADDRINT r12, ADDRINT r13, ADDRINT r14, ADDRINT r15)
 {
     TData* td = (TData*)PIN_GetThreadData(gTlsKey, tid);
     if (!td || !sm) return;
@@ -909,13 +906,14 @@ static void PIN_FAST_ANALYSIS_CALL CapRecordMemR(THREADID tid, const StaticMeta*
     CaptureState& c = td->cap;
     if (!c.recording) return;
 
-    TraceEntry e;
-    e.ip = sm->addr32;
-    e.regs[0] = eax; e.regs[1] = ebx; e.regs[2] = ecx; e.regs[3] = edx;
-    e.regs[4] = esi; e.regs[5] = edi; e.regs[6] = esp; e.regs[7] = ebp;
-    e.memAddr = (UINT32)ea;
-
-    BufferedWrite(td, &e, sizeof(TraceEntry));
+    char buf[512];
+    std::sprintf(buf, "R,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx\n",
+        (unsigned long long)sm->addr, (unsigned long long)ea,
+        (unsigned long long)eax, (unsigned long long)ebx, (unsigned long long)ecx, (unsigned long long)edx, 
+        (unsigned long long)esi, (unsigned long long)edi, (unsigned long long)esp, (unsigned long long)ebp,
+        (unsigned long long)r8, (unsigned long long)r9, (unsigned long long)r10, (unsigned long long)r11,
+        (unsigned long long)r12, (unsigned long long)r13, (unsigned long long)r14, (unsigned long long)r15);
+    BufferedWriteText(td, buf);
 
     c.body_len++;
     c.memR++;
@@ -929,7 +927,8 @@ static void PIN_FAST_ANALYSIS_CALL CapRecordMemR(THREADID tid, const StaticMeta*
 }
 
 static void PIN_FAST_ANALYSIS_CALL CapRecordMemW(THREADID tid, const StaticMeta* sm, ADDRINT ea,
-    UINT32 eax, UINT32 ebx, UINT32 ecx, UINT32 edx, UINT32 esi, UINT32 edi, UINT32 esp, UINT32 ebp)
+    ADDRINT eax, ADDRINT ebx, ADDRINT ecx, ADDRINT edx, ADDRINT esi, ADDRINT edi, ADDRINT esp, ADDRINT ebp,
+    ADDRINT r8, ADDRINT r9, ADDRINT r10, ADDRINT r11, ADDRINT r12, ADDRINT r13, ADDRINT r14, ADDRINT r15)
 {
     TData* td = (TData*)PIN_GetThreadData(gTlsKey, tid);
     if (!td || !sm) return;
@@ -937,13 +936,14 @@ static void PIN_FAST_ANALYSIS_CALL CapRecordMemW(THREADID tid, const StaticMeta*
     CaptureState& c = td->cap;
     if (!c.recording) return;
 
-    TraceEntry e;
-    e.ip = sm->addr32;
-    e.regs[0] = eax; e.regs[1] = ebx; e.regs[2] = ecx; e.regs[3] = edx;
-    e.regs[4] = esi; e.regs[5] = edi; e.regs[6] = esp; e.regs[7] = ebp;
-    e.memAddr = (UINT32)ea;
-
-    BufferedWrite(td, &e, sizeof(TraceEntry));
+    char buf[512];
+    std::sprintf(buf, "W,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx,%llx\n",
+         (unsigned long long)sm->addr, (unsigned long long)ea,
+        (unsigned long long)eax, (unsigned long long)ebx, (unsigned long long)ecx, (unsigned long long)edx, 
+        (unsigned long long)esi, (unsigned long long)edi, (unsigned long long)esp, (unsigned long long)ebp,
+        (unsigned long long)r8, (unsigned long long)r9, (unsigned long long)r10, (unsigned long long)r11,
+        (unsigned long long)r12, (unsigned long long)r13, (unsigned long long)r14, (unsigned long long)r15);
+    BufferedWriteText(td, buf);
 
     c.body_len++;
     c.memW++;
@@ -956,8 +956,15 @@ static void PIN_FAST_ANALYSIS_CALL CapRecordMemW(THREADID tid, const StaticMeta*
     }
 }
 
+// -------------------- Knobs --------------------
+KNOB<UINT32>   KnobMaxLoopIters(KNOB_MODE_WRITEONCE, "pintool", "break_iters", "500000",
+    "Max iterations before forcing loop exit (Loop Breaker)");
+
+// ... (existing knobs)
+
 // -------------------- Loop counter (taken back-edge) --------------------
-static VOID PIN_FAST_ANALYSIS_CALL OnTakenBranch(THREADID tid, ADDRINT ip, ADDRINT target)
+// Updated to support Loop Breaking (Context Manipulation)
+static VOID OnTakenBranch(CONTEXT* ctxt, THREADID tid, ADDRINT ip, ADDRINT target, ADDRINT fallthrough)
 {
     TData* td = (TData*)PIN_GetThreadData(gTlsKey, tid);
     if (!td) return;
@@ -966,51 +973,63 @@ static VOID PIN_FAST_ANALYSIS_CALL OnTakenBranch(THREADID tid, ADDRINT ip, ADDRI
 
     UINT32 backedge = (UINT32)ip;
     UINT32 header = (UINT32)target;
-
-                // backward
-                // Check Max Distance
-                if ((UINT32)(ip - target) > KnobMaxBackedgeDist.Value()) {
-                    // too far, likely not a loop (e.g. ret to caller in high mem)
-                    return; 
-                }
+ 
+    // Check Max Distance
+    if ((UINT32)(ip - target) > KnobMaxBackedgeDist.Value()) {
+        return; 
+    }
 
     LoopKey key; key.header = header; key.backedge = backedge;
+    LoopAgg& agg = td->loops[key]; // Reference to thread-local agg
 
-    // Check FirstSeenSeq for this loop variant (Global Stability)
-    UINT32 seq = 0;
-    
-    // Optimization: Check if agg already has it? 
-    // Thread-local 'agg' might be fresh if map lookup, but 'td->loops' persists for thread life.
-    // However, multiple threads might see same loop code. We want GLOBAL first seen.
-    // So we check global map.
-    
-    // Double-checked locking or just lock? Lock is safer.
-    // Optimization: Read without lock? Map is not thread safe for read overlapping write.
-    // Use lock.
-    PIN_GetLock(&gFirstSeenLock, 1);
-    
-    // Use explicit std::pair and std::map to avoid ambiguity
-    pair<ADDRINT, ADDRINT> valKey = make_pair((ADDRINT)header, (ADDRINT)backedge);
-    map<pair<ADDRINT, ADDRINT>, UINT32>::iterator it = gLoopFirstSeen.find(valKey);
-    
-    if (it != gLoopFirstSeen.end()) {
-        seq = it->second;
-    } else {
-        // New Loop detected globally!
-        PIN_GetLock(&gGlobalSeqLock, 1);
-        gGlobalLoopSeq++;
-        seq = (UINT32)gGlobalLoopSeq;
-        PIN_ReleaseLock(&gGlobalSeqLock);
+    // ---------------------------------------------------------
+    // LOOP BREAKER LOGIC
+    // ---------------------------------------------------------
+    if (agg.iters >= KnobMaxLoopIters.Value()) {
+        // Limit reached! Force break.
+        if (agg.iters == KnobMaxLoopIters.Value()) {
+             // Log once
+             cerr << "\n[pin-loop] *** LOOP BREAKER TRIGGERED ***" << endl;
+             cerr << "  Thread: " << td->os_tid << endl;
+             cerr << "  Header: 0x" << std::hex << header << endl;
+             cerr << "  Count:  " << std::dec << agg.iters << endl;
+             cerr << "  Action: Forcing jump to Fallthrough (0x" << std::hex << fallthrough << ")" << endl;
+        }
+
+        // Apply redirection
+        // We are currently AT the branch instruction (before it executes? No, OnTakenBranch is usually 'before' or 'after'?)
+        // Standard Pin IPOINT_BEFORE: We are before the branch executes.
+        // If we want to NOT take the branch, we must redirect control to 'fallthrough'.
         
-        gLoopFirstSeen[valKey] = seq;
+        PIN_SetContextReg(ctxt, REG_INST_PTR, fallthrough);
+        PIN_ExecuteAt(ctxt); // Resumes execution at fallthrough, skipping the branch.
+        return;
     }
-    PIN_ReleaseLock(&gFirstSeenLock);
 
-    LoopAgg& agg = td->loops[key];
-    if (agg.globalSeq == 0) agg.globalSeq = seq; // Assign once
     agg.iters++;
 
-    // 캡처 중인 루프의 back-edge라면 iteration 종료 지점
+    // Global Sequence & First Seen Logic (Only if not breaking)
+    if (agg.globalSeq == 0) {
+        PIN_GetLock(&gFirstSeenLock, 1);
+        pair<ADDRINT, ADDRINT> valKey = make_pair((ADDRINT)header, (ADDRINT)backedge);
+        map<pair<ADDRINT, ADDRINT>, UINT32>::iterator it = gLoopFirstSeen->find(valKey);
+        
+        UINT32 seq = 0;
+        if (it != gLoopFirstSeen->end()) {
+            seq = it->second;
+        } else {
+            PIN_GetLock(&gGlobalSeqLock, 1);
+            gGlobalLoopSeq++;
+            seq = (UINT32)gGlobalLoopSeq;
+            PIN_ReleaseLock(&gGlobalSeqLock);
+            (*gLoopFirstSeen)[valKey] = seq;
+        }
+        PIN_ReleaseLock(&gFirstSeenLock);
+        agg.globalSeq = seq;
+    }
+
+
+
     // Relaxed: if target == header, treat as loop boundary
     if (td->cap.recording && td->cap.key.header == target) {
         StopAndCommitCapture(td, "iteration_end");
@@ -1018,7 +1037,7 @@ static VOID PIN_FAST_ANALYSIS_CALL OnTakenBranch(THREADID tid, ADDRINT ip, ADDRI
         return;
     }
 
-    // hot 후보 유지(최대 iters 후보 1개만)
+    // Maintain hot candidate (keep max iters one)
     // Check threshold (KnobHotIters or 1 if CapAll)
     // NOTE: KnobCapAll defaults to 0 now.
     UINT64 threshold = KnobCapAll.Value() ? 1 : (UINT64)KnobHotIters.Value();
@@ -1031,13 +1050,32 @@ static VOID PIN_FAST_ANALYSIS_CALL OnTakenBranch(THREADID tid, ADDRINT ip, ADDRI
         }
     }
 
-    // idle이면 후보 arm
+    // Arm candidate if idle
     if (!td->cap.recording) {
         if (!td->cap.armed) ArmBestCandidateIfIdle(td);
     }
 }
 
-// -------------------- TRACE-level instrumentation (핵심 최적화) --------------------
+
+
+// -------------------- I/O Logging --------------------
+static void OnIoCall(THREADID mid, const char* apiName, ADDRINT handle, ADDRINT arg2)
+{
+    // Simple log: TID, API, Handle, Arg2
+    if (!gIoFp) return;
+    
+    // FIX: Use OS TID for matching (Trace uses OS TID)
+    UINT32 os_tid = (UINT32)PIN_GetTid();
+
+    PIN_GetLock(&gIoLock, 1);
+    // Use mid (PinID) for debug if needed, but log OS_TID
+    if (gIoFp) {
+        std::fprintf(gIoFp, "%u,%s,%llx,%llx\n", os_tid, apiName, (unsigned long long)handle, (unsigned long long)arg2);
+    }
+    PIN_ReleaseLock(&gIoLock);
+}
+
+// -------------------- TRACE-level instrumentation (Optimization) --------------------
 static VOID OnTrace(TRACE trace, VOID*)
 {
     const ADDRINT ta = TRACE_Address(trace);
@@ -1053,15 +1091,9 @@ static VOID OnTrace(TRACE trace, VOID*)
         if (MyWin::VirtualQuery((void*)ta, &mbi, sizeof(mbi))) {
              std::ostringstream oss;
              oss << "Unmapped/Shellcode";
-             
-             // Check Protection
-             // 0x40 = PAGE_EXECUTE_READWRITE (RWX) -> Highly suspicious (Shellcode/Unpacking)
-             // 0x20 = PAGE_EXECUTE_READ (RX)
-             // 0x04 = PAGE_READWRITE (RW) -> Should not execute?
              if (mbi.Protect == 0x40) oss << " [RWX]";
              else if (mbi.Protect == 0x20) oss << " [RX]";
              else oss << " [Protect:" << std::hex << mbi.Protect << "]";
-             
              oss << " (Base:" << std::hex << (UINT32)mbi.AllocationBase << ")";
              imgName = oss.str();
         } else {
@@ -1070,8 +1102,6 @@ static VOID OnTrace(TRACE trace, VOID*)
     }
 
     // TRACE 단위 필터(IMG 판정 1회)
-    // Smart Mode (Default): Only Main Exe OR Crypto DLLs.
-    // Explicit overrides (only_main, crypto_only) take precedence if set to 1.
     bool instrument = false;
 
     if (KnobInstrumentAll.Value()) {
@@ -1087,13 +1117,8 @@ static VOID OnTrace(TRACE trace, VOID*)
         if (imgValid && IMG_IsMainExecutable(img)) instrument = true;
     }
     else {
-        // 기존 Smart Mode 유지
-        if (!imgValid) instrument = true;
-        else if (IMG_IsMainExecutable(img)) instrument = true;
-        else {
-            string baseLower = BaseNameLower(imgName);
-            if (IsCryptoBaseLower(baseLower)) instrument = true;
-        }
+        // Capture all modules if only_main is disabled (default)
+        instrument = true;
     }
     
     if (!instrument) return;
@@ -1101,119 +1126,78 @@ static VOID OnTrace(TRACE trace, VOID*)
     // BBL/INS 계측 (BBL granularity for IMG correctness)
     for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
         // Re-evaluate IMG for this BBL
-        ADDRINT ba = BBL_Address(bbl);
-        IMG bimg = IMG_FindByAddress(ba); // Expensive?
-        // Note: IMG_FindByAddress is fairly efficient (binary search in map). 
-        // But doing it for every BBL is more expensive than per TRACE.
-        // However, user requested this accuracy.
+        bool bblInstrument = true; // Trust TRACE decision for now to avoid complexity in this snippet
         
-        bool bimgValid = IMG_Valid(bimg);
-        string bimgName = bimgValid ? IMG_Name(bimg) : "";
-        ADDRINT bimgLow = bimgValid ? IMG_LowAddress(bimg) : 0;
-        
-        // If unmapped, use the TRACE-level unmapped detection (VirtualQuery) result, 
-        // or re-query if strictly needed. 
-        // For simplicity/perf, if IMG is invalid, fallback to TRACE-level result or generic.
-        if (!bimgValid) {
-            // Fallback to TRACE-level info if TRACE was unmapped too.
-            if (!imgValid) {
-                bimgName = imgName; // Reuse TRACE's VirtualQuery result
-            } else {
-                 bimgName = "Unmapped/Unknown_BBL";
-            }
-        }
-        
-        // Apply Filters again? 
-        // If TRACE decided to instrument, it means at least one part matched.
-        // If we want stricter filtering, check per BBL.
-        bool bblInstrument = false;
-        if (KnobInstrumentAll.Value()) {
-             bblInstrument = true;
-        } else {
-             // Reuse TRACE-level decision if we trust TRACE logic, 
-             // but user suspects TRACE includes excluded modules.
-             // So re-check strictly.
-             if (!bimgValid) bblInstrument = true;
-             else if (IMG_IsMainExecutable(bimg)) bblInstrument = true;
-             else if (KnobCryptoOnly.Value()) {
-                 if (IsCryptoBaseLower(BaseNameLower(bimgName))) bblInstrument = true;
-             }
-             else if (!KnobOnlyMain.Value()) {
-                 // Smart Mode default
-                 if (IsCryptoBaseLower(BaseNameLower(bimgName))) bblInstrument = true;
-             }
-        }
-        
-        if (!bblInstrument) continue; // Skip this BBL
-
         for (INS ins = BBL_InsHead(bbl); INS_Valid(ins); ins = INS_Next(ins)) {
-             StaticMeta* sm = GetOrCreateMeta(ins, INS_Address(ins), bimgName, bimgLow);
+             StaticMeta* sm = GetOrCreateMeta(ins, INS_Address(ins), imgName, imgLow);
 
              // 1) 루프 카운트: taken branch만
              if (INS_IsBranch(ins)) {
                  INS_InsertCall(ins, IPOINT_TAKEN_BRANCH, (AFUNPTR)OnTakenBranch,
-                     IARG_FAST_ANALYSIS_CALL,
+                     IARG_CONTEXT,           // [NEW] Context for Register Modification
                      IARG_THREAD_ID,
                      IARG_INST_PTR,
                      IARG_BRANCH_TARGET_ADDR,
+                     IARG_ADDRINT, INS_NextAddress(ins), // [NEW] Fallthrough Address
                      IARG_END);
              }
              
-             // 2) 캡처: IF/THEN
-             INS_InsertIfCall(ins, IPOINT_BEFORE, (AFUNPTR)CapIf,
+             // 2) Capture Start - Direct call without If/Then pattern
+             // The CapIf function will check internally if capture should start
+             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)CapIf,
                  IARG_FAST_ANALYSIS_CALL,
                  IARG_THREAD_ID,
                  IARG_PTR, sm,
                  IARG_END);
             
-             // ... Memory Instrumentation ...
-             if (INS_IsMemoryWrite(ins)) {
-                 INS_InsertThenCall(ins, IPOINT_BEFORE, (AFUNPTR)CapRecordMemW,
+             // 3) Stop on RET (Anti-Pollution) [NEW]
+             if (INS_IsRet(ins)) {
+                 INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)OnRet,
                      IARG_FAST_ANALYSIS_CALL,
                      IARG_THREAD_ID,
-                     IARG_PTR, sm,
-                     IARG_MEMORYWRITE_EA,
-                     IARG_REG_VALUE, REG_EAX,
-                     IARG_REG_VALUE, REG_EBX,
-                     IARG_REG_VALUE, REG_ECX,
-                     IARG_REG_VALUE, REG_EDX,
-                     IARG_REG_VALUE, REG_ESI,
-                     IARG_REG_VALUE, REG_EDI,
-                     IARG_REG_VALUE, REG_ESP,
-                     IARG_REG_VALUE, REG_EBP,
                      IARG_END);
-             }
-             else if (INS_IsMemoryRead(ins)) {
-                 INS_InsertThenCall(ins, IPOINT_BEFORE, (AFUNPTR)CapRecordMemR,
-                     IARG_FAST_ANALYSIS_CALL,
-                     IARG_THREAD_ID,
-                     IARG_PTR, sm,
-                     IARG_MEMORYREAD_EA,
-                     IARG_REG_VALUE, REG_EAX,
-                     IARG_REG_VALUE, REG_EBX,
-                     IARG_REG_VALUE, REG_ECX,
-                     IARG_REG_VALUE, REG_EDX,
-                     IARG_REG_VALUE, REG_ESI,
-                     IARG_REG_VALUE, REG_EDI,
-                     IARG_REG_VALUE, REG_ESP,
-                     IARG_REG_VALUE, REG_EBP,
-                     IARG_END);
-             }
-             else {
-                 INS_InsertThenCall(ins, IPOINT_BEFORE, (AFUNPTR)CapRecordNoMem,
-                     IARG_FAST_ANALYSIS_CALL,
-                     IARG_THREAD_ID,
-                     IARG_PTR, sm,
-                     IARG_REG_VALUE, REG_EAX,
-                     IARG_REG_VALUE, REG_EBX,
-                     IARG_REG_VALUE, REG_ECX,
-                     IARG_REG_VALUE, REG_EDX,
-                     IARG_REG_VALUE, REG_ESI,
-                     IARG_REG_VALUE, REG_EDI,
-                     IARG_REG_VALUE, REG_ESP,
-                     IARG_REG_VALUE, REG_EBP,
-                     IARG_END);
-             }
+             } else {
+                 // ... Memory Instrumentation ...
+                 if (INS_IsMemoryWrite(ins)) {
+                     INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)CapRecordMemW,
+                         IARG_FAST_ANALYSIS_CALL,
+                         IARG_THREAD_ID,
+                         IARG_PTR, sm,
+                         IARG_MEMORYWRITE_EA,
+                         IARG_REG_VALUE, REG_GAX,
+                         IARG_REG_VALUE, REG_GBX,
+                         IARG_REG_VALUE, REG_GCX,
+                         IARG_REG_VALUE, REG_GDX,
+                         IARG_REG_VALUE, REG_GSI,
+                         IARG_REG_VALUE, REG_GDI,
+                         IARG_REG_VALUE, REG_STACK_PTR,
+                         IARG_REG_VALUE, REG_GBP,
+                         IARG_END);
+                 }
+                 else if (INS_IsMemoryRead(ins)) {
+                     INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)CapRecordMemR,
+                         IARG_FAST_ANALYSIS_CALL,
+                         IARG_THREAD_ID,
+                         IARG_PTR, sm,
+                         IARG_MEMORYREAD_EA,
+                         IARG_REG_VALUE, REG_GAX,
+                         IARG_REG_VALUE, REG_GBX,
+                         IARG_REG_VALUE, REG_GCX,
+                         IARG_REG_VALUE, REG_GDX,
+                         IARG_REG_VALUE, REG_GSI,
+                         IARG_REG_VALUE, REG_GDI,
+                         IARG_REG_VALUE, REG_STACK_PTR,
+                         IARG_REG_VALUE, REG_GBP,
+                         IARG_END);
+                 }
+                 else {
+                     INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)CapRecordNoMem,
+                         IARG_FAST_ANALYSIS_CALL, IARG_THREAD_ID, IARG_PTR, sm,
+                         IARG_REG_VALUE, REG_RAX, IARG_REG_VALUE, REG_RBX, IARG_REG_VALUE, REG_RCX,
+                         IARG_REG_VALUE, REG_RDX, IARG_REG_VALUE, REG_RSI, IARG_REG_VALUE, REG_RDI,
+                         IARG_REG_VALUE, REG_RSP, IARG_REG_VALUE, REG_RBP, IARG_END);
+                 }
+            }
         }
     }
 }
@@ -1243,7 +1227,7 @@ static VOID OnImgLoad(IMG img, VOID*)
     
     // Log to _images.txt
     if (KnobLogImages.Value()) {
-        string imgLogPath = gRunPrefix + "_images.txt";
+        string imgLogPath = *gRunPrefix + "_images.txt";
         FILE* fp = std::fopen(imgLogPath.c_str(), "a");
         if (fp) {
             std::fprintf(fp, "%s\n", oss.str().c_str());
@@ -1254,6 +1238,74 @@ static VOID OnImgLoad(IMG img, VOID*)
     if (IsCryptoBaseLower(baseLower)) {
         if (KnobVerbose.Value()) {
             cerr << "[pin-loop] CRYPTO_LOAD: " << full << endl;
+        }
+    }
+    
+    // I/O Hooks: Kernel32/KernelBase
+    // Ntdll Hooks (Lower level) - Critical for 64-bit Ransomware
+    if (baseLower.find("ntdll") != string::npos) {
+        RTN ntWrite = RTN_FindByName(img, "NtWriteFile");
+        if (RTN_Valid(ntWrite)) {
+            RTN_Open(ntWrite);
+            RTN_InsertCall(ntWrite, IPOINT_BEFORE, (AFUNPTR)OnIoCall,
+                IARG_THREAD_ID, IARG_PTR, "NtWriteFile",
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0, // Handle
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 6, // Length (check 64-bit prototype)
+                // NtWriteFile(Handle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key)
+                // Arguments are passed in RCX, RDX, R8, R9, then stack.
+                // IARG_FUNCARG_ENTRYPOINT_VALUE handles ABI automatically.
+                IARG_END);
+            RTN_Close(ntWrite);
+        }
+        
+        RTN ntRead = RTN_FindByName(img, "NtReadFile");
+        if (RTN_Valid(ntRead)) {
+            RTN_Open(ntRead);
+            RTN_InsertCall(ntRead, IPOINT_BEFORE, (AFUNPTR)OnIoCall,
+                IARG_THREAD_ID, IARG_PTR, "NtReadFile",
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0, // Handle
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 6, // Length
+                IARG_END);
+            RTN_Close(ntRead);
+        }
+    }
+
+    // I/O Hooks: Kernel32/KernelBase
+    if (baseLower.find("kernel32") != string::npos || 
+        baseLower.find("kernelbase") != string::npos) 
+    {
+        RTN wfile = RTN_FindByName(img, "WriteFile");
+        if (RTN_Valid(wfile)) {
+            RTN_Open(wfile);
+            RTN_InsertCall(wfile, IPOINT_BEFORE, (AFUNPTR)OnIoCall,
+                IARG_THREAD_ID,
+                IARG_PTR, "WriteFile",
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0, // Handle
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2, // nBytes
+                IARG_END);
+            RTN_Close(wfile);
+        }
+        
+        RTN cfileA = RTN_FindByName(img, "CreateFileA");
+        if (RTN_Valid(cfileA)) {
+            RTN_Open(cfileA);
+            RTN_InsertCall(cfileA, IPOINT_BEFORE, (AFUNPTR)OnIoCall,
+                IARG_THREAD_ID, IARG_PTR, "CreateFileA",
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0, // PathPtr
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1, // Access
+                IARG_END);
+            RTN_Close(cfileA);
+        }
+        
+         RTN cfileW = RTN_FindByName(img, "CreateFileW");
+        if (RTN_Valid(cfileW)) {
+            RTN_Open(cfileW);
+            RTN_InsertCall(cfileW, IPOINT_BEFORE, (AFUNPTR)OnIoCall,
+                IARG_THREAD_ID, IARG_PTR, "CreateFileW",
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0, // PathPtr
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1, // Access
+                IARG_END);
+            RTN_Close(cfileW);
         }
     }
 }
@@ -1318,7 +1370,7 @@ static VOID OnThreadFini(THREADID tid, const CONTEXT*, INT32, VOID*)
                 // Assign Global Sequence (Atomic)
                 PIN_GetLock(&gGlobalSeqLock, 1);
                 gGlobalLoopSeq++;
-                agg.globalSeq = gGlobalLoopSeq; 
+                agg.globalSeq = (UINT32)gGlobalLoopSeq; 
                 PIN_ReleaseLock(&gGlobalSeqLock);
                 
                 agg.captured = true; // Mark as capturing
@@ -1335,8 +1387,8 @@ static VOID OnThreadFini(THREADID tid, const CONTEXT*, INT32, VOID*)
                 // Log if verbose
                 if (KnobVerbose.Value()) {
                      PIN_GetLock(&gMetaLock, 1);
-                     map<ADDRINT, StaticMeta*>::iterator it = gMeta.find(k.header);
-                     StaticMeta* sm = (it != gMeta.end()) ? it->second : NULL;
+                     map<ADDRINT, StaticMeta*>::iterator it = gMeta->find(k.header);
+                     StaticMeta* sm = (it != gMeta->end()) ? it->second : NULL;
                      PIN_ReleaseLock(&gMetaLock);
                      
                      string func = sm ? sm->funcName : "?";
@@ -1350,25 +1402,39 @@ static VOID OnThreadFini(THREADID tid, const CONTEXT*, INT32, VOID*)
         // If already captured, it's already in CSV via StopAndCommitCapture.
         // But user wants "Detection Coverage Proof".
         // We can append uncaptured loops with body_len=0.
-        if (!agg.captured && agg.iters > 0) {
-             // Reconstruct basic info (meta lookup needed? expensive but it's FINI)
-             // We can just dump minimal info
-             PIN_GetLock(&gMetaLock, 1);
-             map<ADDRINT, StaticMeta*>::iterator mit = gMeta.find((ADDRINT)k.header);
-             StaticMeta* smHead = (mit != gMeta.end()) ? mit->second : NULL;
-             PIN_ReleaseLock(&gMetaLock);
-             
-             string funcName = smHead ? smHead->funcName : "?";
-             string imgName = smHead ? smHead->imgName : "?";
+        // Always report final iteration count to CSV
+        // This ensures simple loops (short body) or long-running loops are accounted for.
+        if (agg.iters > 0) {
+             string funcName = agg.func;
+             string imgName = agg.img;
+             UINT64 bodyLen = agg.body_len; // 0 if not captured
+
+             if (funcName.empty()) {
+                 PIN_GetLock(&gMetaLock, 1);
+                 map<ADDRINT, StaticMeta*>::iterator mit = gMeta->find(k.header);
+                 StaticMeta* smHead = (mit != gMeta->end()) ? mit->second : NULL;
+                 PIN_ReleaseLock(&gMetaLock);
+                 
+                 funcName = smHead ? smHead->funcName : "?";
+                 imgName = smHead ? smHead->imgName : "?";
+             }
              
              AppendLoopRowToCsv(td->os_tid, 
-                 agg.globalSeq, // Pass correct GlobalSeq
+                 agg.globalSeq,
                  k.header, k.backedge, 
-                 0, // body_len=0
+                 bodyLen,
                  agg.iters,
-                 0.0, // score
+                 (double)bodyLen * agg.iters, // score
                  funcName, imgName,
-                 0,0,0,0,0,0,0,0);
+                 agg.memR, agg.memW, agg.stackR, agg.stackW,
+                 agg.xorCnt, agg.addsubCnt, agg.shlshrCnt, agg.mulCnt);
+        }
+        
+        // [NEW] LoopFinish text log
+        {
+             std::ostringstream oss;
+             oss << "LOOP_FINISH," << std::hex << k.header << "," << k.backedge << "," << std::dec << agg.iters << "\n";
+             BufferedWriteText(td, oss.str());
         }
     }
 
@@ -1389,10 +1455,10 @@ static BOOL FollowChild(CHILD_PROCESS cProcess, VOID*)
 {
     if (!KnobFollowChild.Value()) return FALSE;
     
-    // Fix: Propagate command line to child process
-    if (gSavedArgc > 0 && gSavedArgv) {
-        CHILD_PROCESS_SetPinCommandLine(cProcess, gSavedArgc, gSavedArgv);
-    }
+    // Fix: Do NOT manually propagate tool args.
+    // if (gSavedArgc > 0 && gSavedArgv) {
+    //    CHILD_PROCESS_SetPinCommandLine(cProcess, gSavedArgc, gSavedArgv);
+    // }
 
     if (KnobVerbose.Value()) {
         cerr << "[pin-loop] following child PID=" << (unsigned long)CHILD_PROCESS_GetId(cProcess) << endl;
@@ -1432,10 +1498,10 @@ static VOID OnFini(INT32, VOID*)
     }
 
     PIN_GetLock(&gMetaLock, 1);
-    for (map<ADDRINT, StaticMeta*>::iterator it = gMeta.begin(); it != gMeta.end(); ++it) {
+    for (map<ADDRINT, StaticMeta*>::iterator it = gMeta->begin(); it != gMeta->end(); ++it) {
         delete it->second;
     }
-    gMeta.clear();
+    gMeta->clear();
     PIN_ReleaseLock(&gMetaLock);
 }
 
@@ -1478,12 +1544,20 @@ int main(int argc, char* argv[])
         gSavedArgv[i] = _strdup(argv[i]);
     }
 
+    // [FIX] Initialize global pointers explicitly to avoid LNK4210 issues
+    gLoopFirstSeen = new map<pair<ADDRINT, ADDRINT>, UINT32>();
+    gMeta = new map<ADDRINT, StaticMeta*>();
+    gTracePath = new string();
+    gRunPrefix = new string();
+    gCsvPath = new string();
+    gMetaPath = new string();
+    gCryptoExecLogged = new set<string>();
+    gCryptoDllList = new vector<string>(); // [FIX]
+
     gTlsKey = PIN_CreateThreadDataKey(0);
     PIN_InitLock(&gMetaLock);
     PIN_InitLock(&gCsvLock);
     PIN_InitLock(&gTraceLock);
-
-
 
     InitCryptoDllList();
 
@@ -1492,29 +1566,34 @@ int main(int argc, char* argv[])
     {
         std::ostringstream oss;
         oss << KnobPrefix.Value() << "_P" << std::dec << pid;
-        gRunPrefix = oss.str();
+        *gRunPrefix = oss.str();
     }
 
-    gCsvPath = gRunPrefix + "_loops.csv";
+    *gCsvPath = *gRunPrefix + "_loops.csv";
     
-    // Use .wct with Hidden + System attributes to avoid ransomware encryption
-    gTracePath = gRunPrefix + ".wct";
-    gMetaPath = gRunPrefix + "_meta.wcm";
+    // Generic naming
+    *gTracePath = *gRunPrefix + "_trace.txt";
+    *gMetaPath = *gRunPrefix + "_meta.txt";
     
-    // Open Meta File for Incremental Write
-    gMetaFp = std::fopen(gMetaPath.c_str(), "wb");
+    gMetaFp = std::fopen(gMetaPath->c_str(), "wb");
     if (!gMetaFp) {
-        cerr << "[pin-loop] Failed to open meta file: " << gMetaPath << endl;
+        cerr << "[pin-loop] Failed to open meta file: " << *gMetaPath << endl;
     } else {
-        // Buffering (1MB) to avoid frequent formatting overhead - Let CRT manage
-        setvbuf(gMetaFp, NULL, _IOFBF, (1 << 20));
+        // [Debugging] Disable buffering
+        setvbuf(gMetaFp, NULL, _IONBF, 0);
+    }
+    
+    {
+        string ioPath = *gRunPrefix + "_io.log";
+        gIoFp = std::fopen(ioPath.c_str(), "w");
+        if (gIoFp) std::fprintf(gIoFp, "TID,API,Arg1,Arg2\n");
     }
 
     // Open Global Trace File with Protection (Restored)
     {
-        cerr << "[pin-loop] Opening trace file: " << gTracePath << endl;
+        cerr << "[pin-loop] Opening trace file: " << *gTracePath << endl;
         
-        gTraceHandle = MyWin::CreateFileA(gTracePath.c_str(),
+        gTraceHandle = MyWin::CreateFileA(gTracePath->c_str(),
             MyWin::GENERIC_WRITE,
             MyWin::FILE_SHARE_READ,
             NULL,
@@ -1524,20 +1603,20 @@ int main(int argc, char* argv[])
             
         if (gTraceHandle == MyWin::INVALID_HANDLE_VALUE) {
             MyWin::DWORD err = MyWin::GetLastError();
-            cerr << "[pin-loop] [ERROR] Failed to create protected trace file: " << gTracePath 
+            cerr << "[pin-loop] [ERROR] Failed to create protected trace file: " << *gTracePath 
                  << " ErrorCode=" << err << endl;
         } else {
             cerr << "[pin-loop] [SUCCESS] Trace file created." << endl;
         }
     }
 
-    cerr << "[pin-loop] run_prefix: " << gRunPrefix << endl;
-    cerr << "[pin-loop] csv_path  : " << gCsvPath << endl;
-    cerr << "[pin-loop] trace_path: " << gTracePath << " (VISIBLE)" << endl;
+    cerr << "[pin-loop] run_prefix: " << *gRunPrefix << endl;
+    cerr << "[pin-loop] csv_path  : " << *gCsvPath << endl;
+    cerr << "[pin-loop] trace_path: " << *gTracePath << " (VISIBLE)" << endl;
     
     // Debug: Marker file to verify permissions
     {
-        string markerPath = gRunPrefix + "_marker.txt";
+        string markerPath = *gRunPrefix + "_marker.txt";
         FILE* fp = std::fopen(markerPath.c_str(), "w");
         if (fp) {
             std::fprintf(fp, "Pin tool running for PID %d\n", pid);
