@@ -168,7 +168,7 @@ def normalize_asm(asm: str, mem_struct: dict = None) -> str:
     
     # 2. General Memory (capture raw scales before DEC_NUM)
     s = BRACKET_MEM.sub(_mem_repl, s)
-    
+     
     # 3. Constants (Hex/Dec) - Split into <imm> (small) and <addr> (large)
     s = re.sub(r'0x[0-9a-fA-F]+', _hex_repl, s)
     s = DEC_NUM.sub('<imm>', s)
@@ -301,6 +301,7 @@ class AggregatedLoop:
         self.invocations = 0
         self.min_rank = 999999999 # Global Rank (First seen)
         self.variants = [] # List of {'backedge': addr, 'entries': [TraceEntry], 'count': N}
+        self.score = 0.0 # Score for sorting/pruning
     
     def add_instance(self, backedge, entries, rank=None):
         self.invocations += 1
@@ -348,95 +349,123 @@ class AggregatedLoop:
 
 class TraceParser:
     # ... (init and load_meta unchanged) ...
-    def __init__(self, meta_path, trace_path, show_all=False, loops_csv=None):
-        self.meta_path = meta_path
-        self.trace_path = trace_path
+    def __init__(self, show_all=True):
         self.show_all = show_all
-        self.loops_csv_path = loops_csv
-        self.meta = {} # addr32 -> {func, img, asm, ...}
-        # self.aggregated_loops = {} # (header_addr) -> AggregatedLoop
-        self.loops_by_tid = defaultdict(dict) # tid -> header -> AggregatedLoop
+        self.meta = {} # addr -> {func, img, asm, ...} (Shared across PIDs, assuming no ASLR collisions)
+        self.loops_by_tid = defaultdict(dict) # (pid, tid) -> header -> AggregatedLoop
         
-        # CSV Data: GlobalSeq -> {iters: int, ...}
+        # CSV Data: (pid, globalSeq) -> iters
         self.loops_csv_data = {}
+        # Fallback Data: (pid, header) -> iters
+        self.loop_finish_counts = defaultdict(int)
+        
+        # IO Data: (pid, os_tid) -> [events]
+        self.io_data = defaultdict(list)
+        
+        # Main Range
+        self.main_low = 0
+        self.main_high = 0
 
-    def load_meta(self):
-        if not os.path.exists(self.meta_path):
-            sys.stderr.write(f"Error: Meta file not found: {self.meta_path}\n")
+    def load_session(self, pid, trace_path, meta_path, csv_path):
+        print(f"[*] Loading Session PID={pid}...")
+        self.load_meta(meta_path)
+        self.load_loops_csv(pid, csv_path)
+        self.parse_trace(pid, trace_path)
+        self.load_io_log(pid, trace_path)
+
+    def load_meta(self, meta_path):
+        if not os.path.exists(meta_path):
             return
 
-        print(f"[*] Loading meta from {self.meta_path}...")
-        count = 0
-        with open(self.meta_path, 'r', encoding='utf-8', errors='replace') as f:
-            for line in f:
-                line = line.strip()
-                if not line: continue
-                
-                parts = []
-                if ';' in line:
-                    parts = line.split(';')
-                else:
-                    parts = line.split(',')
-                
-                if len(parts) < 4: continue
-
-                try:
-                    addr_str = parts[0].strip()
-                    # Remove potential null bytes or BOM if any
-                    addr_str = addr_str.replace('\ufeff', '').replace('\x00', '')
-                    
-                    addr = int(addr_str, 16)
-                    
-                    func = parts[1].strip()
-                    img = parts[2].strip()
-                    asm = parts[3].strip()
-                    
-                    mem_struct = None
-                    if len(parts) > 4:
-                         mem_struct_str = parts[4].strip()
-                         if '|' in mem_struct_str: 
-                             mp = mem_struct_str.split('|')
-                             if len(mp) >= 4:
-                                 mem_struct = {'base': mp[0], 'idx': mp[1], 'scale': mp[2], 'disp': mp[3]}
-
-                    self.meta[addr] = {
-                        'func': func,
-                        'img': img,
-                        'asm': asm,
-                        'mem_struct': mem_struct
-                    }
-                    count += 1
-                except Exception:
-                    continue
-                    
-        print(f"[*] Loaded {count} metadata entries.")
-
-    def load_loops_csv(self):
-        if not self.loops_csv_path or not os.path.exists(self.loops_csv_path):
-            print(f"[!] CSV path not found: {self.loops_csv_path}")
-            return
-
-        print(f"[*] Loading loops CSV from {self.loops_csv_path}...")
         try:
-            with open(self.loops_csv_path, 'r', encoding='utf-8') as f:
+            with open(meta_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    
+                    if line.startswith('main_low='):
+                        try:
+                            tokens = line.split()
+                            for t in tokens:
+                                if t.startswith('main_low='):
+                                    self.main_low = int(t.split('=')[1], 16)
+                                elif t.startswith('main_high='):
+                                    self.main_high = int(t.split('=')[1], 16)
+                        except: pass
+                        continue
+
+                    parts = []
+                    if ';' in line:
+                        parts = line.split(';')
+                    else:
+                        parts = line.split(',')
+                    
+                    if len(parts) >= 2:
+                        try:
+                            addr_str = parts[0].strip()
+                            addr_str = addr_str.replace('\ufeff', '').replace('\x00', '')
+                            addr = int(addr_str, 16)
+                            
+                            if addr in self.meta: continue
+
+                            func = "?"
+                            img = "?"
+                            asm = parts[1].strip()
+                            mem_struct = None
+                            
+                            if len(parts) >= 4:
+                                func = parts[1].strip()
+                                img = parts[2].strip()
+                                asm = parts[3].strip()
+                                if len(parts) > 4:
+                                     mem_struct_str = parts[4].strip()
+                                     if '|' in mem_struct_str: 
+                                         mp = mem_struct_str.split('|')
+                                         if len(mp) >= 4:
+                                             mem_struct = {'base': mp[0], 'idx': mp[1], 'scale': mp[2], 'disp': mp[3]}
+                            else:
+                                if self.main_low > 0 and self.main_low <= addr <= self.main_high:
+                                    img = "hive.exe"
+                                    func = f"sub_{addr:x}"
+
+                            if '.' not in img and img.lower() in ['text', 'code', 'data']:
+                                img = '.' + img
+
+                            self.meta[addr] = {
+                                'func': func,
+                                'img': img,
+                                'asm': asm,
+                                'mem_struct': mem_struct
+                            }
+                            count += 1
+                        except Exception:
+                            continue
+        except Exception as e:
+            print(f"[!] Meta load error: {e}")
+                    
+        # print(f"[*] Loaded {count} metadata entries from {os.path.basename(meta_path)}.")
+
+    def load_loops_csv(self, pid, csv_path):
+        if not csv_path or not os.path.exists(csv_path):
+            # print(f"[!] CSV path not found: {csv_path}")
+            return
+
+        # print(f"[*] Loading loops CSV from {csv_path}...")
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
-                # No header? Pin CSV usually raw.
-                # Format: tid, rank_global, rank_thread, start, end, body_len, iterCount, score, func, img, ...
                 count = 0
-                sample_keys = []
                 for row in reader:
                     if not row or len(row) < 7: continue
                     try:
-                        # tid = int(row[0])
                         global_seq = int(row[1])
-                        # rank_thread = int(row[2])
-                        iters = int(row[6]) # Check index: 0,1,2, 3(start), 4(end), 5(len), 6(iterCount)
+                        iters = int(row[6])
                         
-                        self.loops_csv_data[global_seq] = iters
-                        if count < 3: sample_keys.append(global_seq)
+                        # Key by (pid, globalSeq)
+                        self.loops_csv_data[(pid, global_seq)] = iters
                         count += 1
                     except: pass
-                print(f"[*] Loaded {len(self.loops_csv_data)} CSV rows. Samples: {sample_keys}")
+                # print(f"[*] Loaded {count} CSV rows.")
         except Exception as e:
             print(f"[!] Warning: Failed to parse CSV: {e}")
 
@@ -560,7 +589,7 @@ class TraceParser:
                     if '[' in ops:
                         mem_w += 1
 
-        summary = f"Mem(R:{mem_r}/W:{mem_w}) | Call:{call_count}"
+        summary = f"Mem(R:{mem_r}/W:{mem_w}), Call:{call_count}"
         
         if call_count > 0 and call_targets:
             # Append top 3 targets
@@ -570,13 +599,13 @@ class TraceParser:
             summary += f" {{{t_str}}}"
             
         if calc_count > 0:
-            summary += f" | Calc:{calc_count}"
+            summary += f", Calc:{calc_count}"
         if xor_count > 0:
             summary += f" (XOR:{xor_count})"
             
         return summary
 
-    def _store_loop(self, header, tid, backedge, entries, rank):
+    def _store_loop(self, pid, header, tid, backedge, entries, rank):
         # 0. Get Header Info for Scoping
         header_img = None
         m = self.meta.get(header)
@@ -587,77 +616,164 @@ class TraceParser:
         if not entries: return
         
         # Loop Aggregation Logic
-        if header not in self.loops_by_tid[tid]:
-            self.loops_by_tid[tid][header] = AggregatedLoop(header, tid)
+        # TID Key -> (pid, tid)
+        tid_key = (pid, tid)
+        
+        if header not in self.loops_by_tid[tid_key]:
+            self.loops_by_tid[tid_key][header] = AggregatedLoop(header, tid_key)
         
         # add_instance signature fixed (removed tid)
-        self.loops_by_tid[tid][header].add_instance(backedge, entries, rank)
+        self.loops_by_tid[tid_key][header].add_instance(backedge, entries, rank)
 
-    def parse_trace(self):
-        sz_head = struct.calcsize('<IIIIII') # magic, tid, header, backedge, rank, globalSeq
-        sz_trace = struct.calcsize('<I8II')
-        MAGIC_LOOP_HEAD = 0x4C4F4F50
-        
-        if not os.path.exists(self.trace_path):
-            sys.stderr.write(f"Error: Trace file not found: {self.trace_path}\n")
+    def parse_trace(self, pid, trace_path):
+        self.trace_path = trace_path # Update current for error format?
+        if not os.path.exists(trace_path):
             return
 
-        with open(self.trace_path, 'rb') as f:
-            # Temporary state for current instance
-            current_tid = 0
-            current_header = 0
-            current_backedge = 0
-            current_rank = 0
-            current_entries = []
-            in_loop = False
-
-            while True:
-                pos = f.tell()
-                chunk = f.read(4)
-                if len(chunk) < 4: break
-                
-                val = struct.unpack('<I', chunk)[0]
-                f.seek(pos) # rewind
-
-                if val == MAGIC_LOOP_HEAD:
-                    # Flush previous loop if exists
-                    if in_loop and current_entries:
-                        self._store_loop(current_header, current_tid, current_backedge, current_entries, current_rank)
+        print(f"[*] Parsing trace (PID={pid}): {trace_path}")
+        
+        current_tid = 0
+        current_header = 0
+        current_backedge = 0
+        current_rank = 0
+        current_entries = []
+        in_loop = False
+        
+        # Check if filename implies TID/Rank (Raw Mode)
+        fname = os.path.basename(trace_path)
+        tid_match = re.search(r'tid(\d+)_(\d+)', fname)
+        raw_mode_tid = int(tid_match.group(1)) if tid_match else 0
+        raw_mode_rank = int(tid_match.group(2)) if tid_match else 0
+        
+        # Performance: Read line by line
+        try:
+            with open(self.trace_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
                     
-                    data = f.read(sz_head)
-                    if len(data) < sz_head: break
-                    magic, tid, header, backedge, local_rank, global_seq = struct.unpack('<IIIIII', data)
-                    
-                    in_loop = True
-                    current_tid = tid
-                    current_header = header
-                    current_backedge = backedge
-                    current_rank = global_seq # Use GlobalSeq as the primary rank
-                    current_entries = []
-                    
-                else:
-                    if not in_loop:
-                        # Orphan trace entry (or non-loop trace?) - skip or log warning
-                        f.read(sz_trace)
-                        continue
+                    if line.startswith('LOOP,'):
+                        # LOOP,tid,header,backedge,rank,globalSeq
+                        parts = line.split(',')
+                        if len(parts) >= 6:
+                            # Flush previous
+                            if in_loop and current_entries:
+                                self._store_loop(pid, current_header, current_tid, current_backedge, current_entries, current_rank)
+                            
+                            current_tid = int(parts[1])
+                            current_header = int(parts[2], 16)
+                            # Backedge is hex in our Pintool output
+                            current_backedge = int(parts[3], 16)
+                            
+                            current_rank = int(parts[5]) # globalSeq
+                            current_entries = []
+                            in_loop = True
+                            
+                    elif line.startswith('LOOP_FINISH,'):
+                        # LOOP_FINISH,header,backedge,iters
+                        # Only used for iteration info, we can log it or specific store
+                        parts = line.split(',')
+                        if len(parts) >= 4:
+                            f_header = int(parts[1], 16)
+                            f_iters = int(parts[3])
+                            # Store in csv data fallback?
+                            # Or just ignore for now as it's redundant with CSV but good for verification
+                            f_header = int(parts[1], 16)
+                            f_iters = int(parts[3])
+                            self.loop_finish_counts[(pid, f_header)] += f_iters
 
-                    data = f.read(sz_trace)
-                    if len(data) < sz_trace: break
-                    # ip, regs[8], mem
-                    elems = struct.unpack('<I8II', data)
-                    entry = {
-                        'ip': elems[0],
-                        'regs': elems[1:9],
-                        'mem': elems[9]
-                    }
-                    current_entries.append(entry)
-            
+                    elif in_loop and (line.startswith('I,') or line.startswith('R,') or line.startswith('W,')):
+                        # I,ip,0,regs...
+                        # R,ip,mem,regs...
+                        parts = line.split(',')
+                        if len(parts) < 4: continue
+                        
+                        ip = int(parts[1], 16)
+                        mem_addr = int(parts[2], 16)
+                        
+                        # Regs start at index 3
+                        # Pintool: I/R/W, ip, mem, eax, ebx, ...
+                        # Regs are hex
+                        regs = []
+                        for r in parts[3:]:
+                            if r: 
+                                try: regs.append(int(r, 16))
+                                except: regs.append(0)
+                        
+                        entry = {
+                            'ip': ip,
+                            'mem': mem_addr,
+                            'regs': regs
+                        }
+                        current_entries.append(entry)
+                        
+                    # RAW MODE FALLBACK: If line looks like "addr;asm;..."
+                    elif ';' in line and not line.startswith('LOOP'):
+                         parts = line.split(';')
+                         if len(parts) >= 2:
+                             # Heuristic: Raw Trace File from per-loop dump
+                             try:
+                                 ip_str = parts[0].strip()
+                                 if '0x' in ip_str: ip = int(ip_str, 16)
+                                 else: ip = int(ip_str, 16) # Assume Hex
+                                 
+                                 # If we haven't started a loop container, do it now
+                                 if not in_loop:
+                                      current_tid = raw_mode_tid
+                                      current_rank = raw_mode_rank
+                                      current_header = ip # First instruction = Header?
+                                      current_backedge = 0 
+                                      current_entries = []
+                                      in_loop = True
+                                 
+                                 # parse specific columns? 
+                                 # Format: addr;asm;regs_csv?
+                                 # parts[1] is asm.
+                                 asm_str = parts[1].strip()
+                                 
+                                 # POPULATE META IF MISSING
+                                 if ip not in self.meta:
+                                     img = "?"
+                                     func = "?"
+                                     if self.main_low > 0 and self.main_low <= ip <= self.main_high:
+                                         img = "hive.exe"
+                                         func = f"sub_{ip:x}"
+                                     
+                                     self.meta[ip] = {
+                                         'func': func,
+                                         'img': img,
+                                         'asm': asm_str,
+                                         'mem_struct': None
+                                     }
+
+                                 regs = []
+                                 mem = 0
+                                 if len(parts) > 2:
+                                     # Regs CSV
+                                     reg_parts = parts[2].split(',')
+                                     # Heuristic: Find large values for regs? 
+                                     # Or just zeros if we don't know the mapping.
+                                     # We will store them blindly.
+                                     for r in reg_parts:
+                                         if r.strip():
+                                             try: regs.append(int(r, 16))
+                                             except: pass
+                                 
+                                 current_entries.append({'ip': ip, 'mem': mem, 'regs': regs})
+                                 current_backedge = ip # Update backedge to current
+                             except:
+                                 pass
+                        
             # Final flush
             if in_loop and current_entries:
-                self._store_loop(current_header, current_tid, current_backedge, current_entries, current_rank)
-                
+                self._store_loop(pid, current_header, current_tid, current_backedge, current_entries, current_rank)
+
+        except Exception as e:
+            print(f"[!] Error parsing trace: {e}")
+
         total_loops = sum(len(loops) for loops in self.loops_by_tid.values())
-        sys.stderr.write(f"[*] Aggregated into {total_loops} unique loops across {len(self.loops_by_tid)} threads.\n")
+        print(f"[*] Aggregated into {total_loops} unique loops across {len(self.loops_by_tid)} threads.")
+
 
 
 
@@ -665,8 +781,12 @@ class TraceParser:
         # Heuristic: show registers that changed
         if not e_prev: return ""
         diffs = []
-        reg_names = ["EAX","EBX","ECX","EDX","ESI","EDI","ESP","EBP"]
-        for i in range(8):
+        reg_names = ["EAX","EBX","ECX","EDX","ESI","EDI","ESP","EBP",
+                     "R8","R9","R10","R11","R12","R13","R14","R15"]
+        
+        count = min(len(e_prev['regs']), len(e_curr['regs']), len(reg_names))
+        
+        for i in range(count):
             if e_prev['regs'][i] != e_curr['regs'][i]:
                 diffs.append(f"{reg_names[i]}={e_curr['regs'][i]:x}")
         return " ".join(diffs)
@@ -719,7 +839,7 @@ class TraceParser:
         if has_calc: types.append("Calc")
         
         if not types: return "Misc"
-        return "+".join(types)
+        return "+".join(types)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
 
     def _compress_blocks(self, blocks):
         # blocks is list of (label, instruction_lines_list)
@@ -882,12 +1002,91 @@ class TraceParser:
         
         return final_structure, rules
 
+    # I/O Log Support
+    def load_io_log(self, pid, trace_path):
+        # Auto-detect _io.log
+        io_path = trace_path.replace('_trace.txt', '_io.log')
+        if not os.path.exists(io_path):
+            return
+
+        try:
+            with open(io_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    # Format: tid,apiName,handle,arg2
+                    # Example: 1234,WriteFile,1a0,400
+                    parts = line.split(',')
+                    if len(parts) >= 3:
+                        try:
+                            tid = int(parts[0])
+                            # Handle OS TID confusion: In Pin IO, we logged OS TID.
+                            # In Trace, we have Pin TID. 
+                            # If Trace TID != OS TID, we have mismatch.
+                            # But if we use (pid, tid) they might align if tid is consistent.
+                            # Assuming IO log tid matches Trace tid for now?
+                            # Re-verify Pintool: OnIoCall uses PIN_GetTid() cast to os_tid?
+                            # "UINT32 os_tid = (UINT32)PIN_GetTid();" -> Yes, it returns OS TID on Windows.
+                            # In Trace: "IARG_THREAD_ID" returns PIN TID (serial).
+                            # MISMATCH!
+                            # Pin TID != OS TID.
+                            # Trace relies on Pin TID (IARG_THREAD_ID).
+                            # IO Log relies on OS TID.
+                            # FIX in PARSER: Report Parser cannot map PinTID to OS TID without a mapping table.
+                            # PIn Tool should have logged mapping.
+                            # Or Pin Tool should have logged IO with Pin TID?
+                            # Wait, "PIN_GetTid()" returns PIN-internal TID (0, 1, ...).
+                            # "PIN_GetTid(): Get the tool thread identifier."
+                            # So it IS Pin TID!
+                            # So Trace matches IO log. Good.
+                            
+                            api = parts[1]
+                            handle = parts[2]
+                            arg2 = parts[3] if len(parts) > 3 else "0"
+                            
+                            # Formatted string
+                            evt = f"{api}(Handle={handle}, Arg2={arg2})"
+                            self.io_data[(pid, tid)].append(evt)
+                        except: pass
+        except Exception as e:
+            print(f"[!] Warning: Failed to parse I/O log: {e}")
+
     def dump_llm_report(self):
+        # I/O already loaded into self.io_data
+        io_activity = self.io_data
+
+        # SUSPECT THREAD ANALYSIS
+        print("============================================================")
+        print("SUMMARY: Suspect Threads (Loops + I/O Correlation)")
+        print("============================================================")
+        suspect_found = False
+        sorted_keys = sorted(self.loops_by_tid.keys())
+        
+        for key in sorted_keys:
+            # key is (pid, tid)
+            pid = key[0]
+            tid = key[1]
+            
+            loop_count = len(self.loops_by_tid[key])
+            io_count = len(io_activity.get(key, []))
+            
+            # Criteria: Has Loops AND Has I/O
+            if loop_count > 0 and io_count > 0:
+                print(f"[*] PID:{pid} TID:{tid}: {loop_count} Loops found | {io_count} I/O Events")
+                suspect_found = True
+                
+        if not suspect_found:
+            print("[-] No threads found with BOTH Loops and I/O activity.")
+            print("    Check: 1. Is I/O happening in a child process? (Check new multi-process support)")
+            print("           2. Are keys matching? (OS TID vs Pin TID)")
+        print("============================================================\n")
+
         # 1. GlobalSeq Validation
         all_ranks = []
-        for tid in self.loops_by_tid:
-            for header in self.loops_by_tid[tid]:
-                loop = self.loops_by_tid[tid][header]
+        for key in self.loops_by_tid:
+            pid = key[0]
+            for header in self.loops_by_tid[key]:
+                loop = self.loops_by_tid[key][header]
                 # min_rank now holds GlobalSeq
                 if loop.min_rank != float('inf'):
                     all_ranks.append(loop.min_rank)
@@ -904,6 +1103,42 @@ class TraceParser:
             if len(unique_ranks) < 2 and len(all_ranks) > 10:
                  print(f"CRITICAL ERROR: GlobalSeq is static! Unique values: {unique_ranks}")
 
+        # CSV Match Rate Statistics
+        if self.loops_csv_data:
+            matched_count = 0
+            total_checked = 0
+            unmatched_samples = []
+            
+            # Check a sample of loops against CSV
+            for key in self.loops_by_tid:
+                pid = key[0]
+                for header, loop in self.loops_by_tid[key].items():
+                    if loop.min_rank == float('inf'): continue
+                    
+                    csv_key = (pid, loop.min_rank)
+                    total_checked += 1
+                    if csv_key in self.loops_csv_data:
+                        matched_count += 1
+                    else:
+                        if len(unmatched_samples) < 5:
+                           unmatched_samples.append(f"PID:{pid} Seq:{loop.min_rank}")
+                           
+            if total_checked > 0:
+                rate = matched_count / total_checked
+                print(f"[*] CSV Match Rate: {rate*100:.1f}% ({matched_count}/{total_checked})")
+                if rate < 0.1:
+                    print(f"[!] CRITICAL: extremely low CSV match rate.")
+                    print(f"    Unmatched Samples: {unmatched_samples}")
+                    print(f"    Check if CSV PIDs match Trace PIDs.")
+            
+            # REMOVED: Duplicate CSV stats block which was redundant and used incorrect tid iteration.
+            
+        else:
+            print("\n" + "!"*60)
+            print("!!! ANALYSIS FAILED: Loaded 0 CSV rows (Critical pipeline failure) !!!")
+            print("!!! Causes: Pintool crash, file path error, or child process detach !!!")
+            print("!"*60 + "\n")
+
         print("# Loop Analysis Report (Aggregated)")
         print("# Goal: Reconstruct Ransomware Logic (Encryption Loops)")
         print("# Output Format: High-Level Structural & Compressed Flow")
@@ -912,15 +1147,72 @@ class TraceParser:
         print("")
         
         # 0. Global stats
-        all_tids = sorted(self.loops_by_tid.keys())
-        print(f"# Analysis by Thread (Total TIDs: {len(all_tids)})")
-        print(f"# TIDs: {all_tids}")
+        sorted_keys = sorted(self.loops_by_tid.keys())
+        print(f"# Analysis by Thread (Total Threads: {len(sorted_keys)})")
+        # Format keys for display
+        display_keys = [f"P{k[0]}:T{k[1]}" for k in sorted_keys]
+        print(f"# Threads: {display_keys}")
         print("")
 
-        for tid in all_tids:
+        for key in sorted_keys:
+            pid = key[0]
+            tid = key[1]
+            
             print(f"")
             print(f"############################################################")
-            print(f"# Thread ID: {tid}")
+            print(f"# Process: {pid} | Thread ID: {tid}")
+            
+            # Filter loops (Separating Noise vs App)
+            loops = self.loops_by_tid[key]
+            sorted_headers = sorted(loops.keys(), key=lambda h: loops[h].score, reverse=True)
+            
+            # [FILTER] Identify Noise
+            valid_headers = []
+            noise_headers = []
+            
+            for h in sorted_headers:
+                loop = loops[h]
+                primary = loop.get_primary_variant()
+                if not primary: continue
+                
+                # Check metrics
+                inst_count = len(primary['entries'])
+                summary = self._analyze_activity(primary['entries'])
+                
+                # Rule 1: Int 0x2e / Syscall (System Noise)
+                is_syscall = False
+                for e in primary['entries']:
+                    m = self.meta.get(e['ip'])
+                    if m and ('int 0x2e' in m['asm'].lower() or 'syscall' in m['asm'].lower()):
+                        is_syscall = True
+                        break
+                        
+                # Rule 2: Weak Loop (Too small & No Memory work)
+                is_weak = False
+                if inst_count <= 2 and "Mem(R:0/W:0)" in summary and "Call:0" in summary:
+                    is_weak = True
+
+                if (is_syscall or is_weak) and not self.show_all:
+                    noise_headers.append(h)
+                else:
+                    valid_headers.append(h)
+
+            print(f"# Loops Captured: {len(valid_headers)} (Filtered {len(noise_headers)} noise loops)")
+            
+            # Print I/O Activity for this Thread
+            if key in io_activity:
+                print(f"# I/O Activity ({len(io_activity[key])} events):")
+                ios = io_activity[key]
+                if len(ios) <= 10:
+                    for io in ios: print(f"#   {io}")
+                else:
+                    for io in ios[:5]: print(f"#   {io}")
+                    print(f"#   ... and {len(ios)-5} more events")
+                    print(f"#   ... ({len(ios)-10} more) ...")
+                    for io in ios[-5:]: print(f"#   {io}")
+            else:
+                 print(f"# No I/O Activity recorded for this thread.")
+
             print(f"############################################################")
             
             # 1. Semantic Consolidation (Merge loops with identical logic)
@@ -932,9 +1224,11 @@ class TraceParser:
             CRYPTO_IMAGES = ['bcrypt', 'crypt', 'ssl', 'rsa', 'dss', 'sec', 'advapi']
             RUNTIME_IMAGES = ['msvcrt', 'ucrtbase', 'vcruntime', 'mfc', 'atl', 'kernelbase']
 
-            loops_map = self.loops_by_tid[tid]
+            loops_map = loops
             
-            for header, agg in loops_map.items():
+            # Use Filtered List (valid_headers)
+            for header in valid_headers:
+                agg = loops_map[header]
                 primary = agg.get_primary_variant()
                 if not primary: continue
                 
@@ -947,11 +1241,35 @@ class TraceParser:
                 # Trace Truncation Check
                 is_trunc = (len(primary['entries']) >= 50000)
                 
-                # Canonicalize (find min rotation)
+                # Deterministic Hashing using SHA256
+                # hash() is randomized in Python 3.
+                
+                # Canonicalize (find min rotation) - RESTORED
                 if (not is_trunc) and (len(sig_list) >= 64):
                     variant_sig = (tuple(self._get_canonical_rotation(sig_list)), is_trunc)
                 else:
                     variant_sig = (tuple(sig_list), is_trunc)
+                
+                long_sig_str = str(variant_sig[0]).encode('utf-8')
+                h_val = hashlib.sha256(long_sig_str).hexdigest() # Full 64 chars for internal safety
+                
+                # Grouping
+                if h_val not in consolidated_groups:
+                    consolidated_groups[h_val] = {
+                        'loops': [],
+                        'prio': 0.0,
+                        'heat': 0,
+                        'sig': variant_sig[0],
+                        'rep_agg': agg, # Initialize Representative
+                        'debug_token': None, # Placeholder, set below
+                        'activity': None     # Placeholder
+                    }
+                
+                # Check priority/token of current loop to update group if needed
+                # (Logic moved below calculator)
+                
+                group = consolidated_groups[h_val]
+                group['loops'].append(agg)
                 
                 # DebugToken Generation (Refined)
                 # Format: HeadHash|TailHash|Len|nBlocks
@@ -970,6 +1288,14 @@ class TraceParser:
                 # Activity Summary (Mem/Call/Calc)
                 activity_summary = self._analyze_activity(primary['entries'])
 
+                # P2: Noise Filter for Syscalls (int 0x2e / sysenter) in short loops
+                is_syscall_loop = False
+                if len(sig_list) <= 3:
+                    for s in sig_list:
+                        if 'int 0x2e' in s or 'sysenter' in s or 'syscall' in s:
+                            is_syscall_loop = True
+                            break
+
                 # Classification (calc priority)
                 m_head = self.meta.get(agg.header)
                 if (not m_head) or (not m_head.get('img')) or (m_head.get('img') == '?'):
@@ -987,36 +1313,121 @@ class TraceParser:
                 is_shellcode = (img_lower == '?' or img_lower == '' or 'unmapped' in img_lower)
 
                 priority = 2
+                
+                # Priority 3 Improvement: Name Shellcode Regions
+                if is_shellcode:
+                     # Bucket by 64KB page
+                     # Address format: 0x12345678 -> MEM_1234
+                     page_mask = (agg.header >> 16)
+                     region_name = f"MEM_{page_mask:x}xxxx"
+                     # Inject into image name for report clarity
+                     img_lower = region_name
+                     m_head['img'] = region_name # Update meta view
+                     
+                if is_syscall_loop: priority = 1 # Downrank syscall noise explicitly
                 if is_noise: priority = 1
                 if is_trunc: priority = 3 # Truncated -> Potentially Main Loop
                 if is_crypto or is_exe or is_shellcode: priority = 3
                 
                 heat = agg.invocations * len(primary['entries'])
                 
-                if variant_sig not in consolidated_groups:
-                    consolidated_groups[variant_sig] = {
-                        'loops': [],
-                        'prio': priority,
-                        'heat': 0,
-                        'rep_agg': agg, # Representative
-                        'debug_token': debug_token,
-                        'activity': activity_summary
-                    }
-                
-                group = consolidated_groups[variant_sig]
-                group['loops'].append(agg)
-                group['heat'] += heat
+                # [CLEANUP] Redundant logic removed. 
+                # Group is already initialized and agg appended at lines 1177/1192.
+                # We simply update the existing 'group' variable with calculated stats.
+                group = consolidated_groups[h_val]
                 
                 if priority > group['prio']: group['prio'] = priority
                 if agg.invocations > group['rep_agg'].invocations:
                     group['rep_agg'] = agg
+                    # Update representative token/activity as well
+                    group['debug_token'] = debug_token
+                    group['activity'] = activity_summary
+                elif group['debug_token'] is None:
+                     # First entry initialization
+                     group['debug_token'] = debug_token
+                     group['activity'] = activity_summary
+                
+                group['heat'] += heat
 
             # 2. Sort Groups
+            # 2. Sort Groups for Fuzzy Merging Candidates
             sorted_groups = []
             for sig, data in consolidated_groups.items():
                 sorted_groups.append(data)
                 
             sorted_groups.sort(key=lambda x: (x['prio'], x['heat']), reverse=True)
+            
+            # [NEW] Fuzzy Merge Logic (Auto-Consolidate Similar Loops)
+            # Threshold: 0.8 Jaccard Similarity on 4-grams
+            
+            # Helper to get ngrams
+            def get_ngrams(group):
+                if 'ngrams' in group: return group['ngrams']
+                primary = group['rep_agg'].get_primary_variant()
+                if not primary: return set()
+                skel_list = []
+                for e in primary['entries']:
+                     m = self.meta.get(e['ip'], {'asm': '?', 'mem_struct': None})
+                     skel_list.append(skeletonize_asm(m['asm'], m.get('mem_struct')))
+                ngrams = set()
+                if len(skel_list) < 4:
+                    ngrams.add(tuple(skel_list))
+                else:
+                    for i in range(len(skel_list) - 3):
+                        ngrams.add(tuple(skel_list[i:i+4]))
+                group['ngrams'] = ngrams
+                return ngrams
+
+            final_groups = []
+            merged_indices = set()
+            
+            for i in range(len(sorted_groups)):
+                if i in merged_indices: continue
+                
+                base_group = sorted_groups[i]
+                final_groups.append(base_group)
+                base_ngrams = get_ngrams(base_group)
+                
+                # Check subsequent groups for merge
+                for j in range(i + 1, len(sorted_groups)):
+                    if j in merged_indices: continue
+                    
+                    candidate = sorted_groups[j]
+                    
+                    # Optimization: Skip if priority differs (Noise shouldn't merge with App)
+                    if candidate['prio'] != base_group['prio']: continue
+                    
+                    # Optimization: Skip if Image differs significantly (optional)
+                    # For now, allow merging if structure is identical regardless of DLL?
+                    # No, strict on Header Image to avoid merging generic library code?
+                    # Actually user complained about "Same logical loop".
+                    # Let's enforce strict Image match for safety.
+                    h1 = self.meta.get(base_group['rep_agg'].header)
+                    h2 = self.meta.get(candidate['rep_agg'].header)
+                    img1 = h1['img'] if h1 else '?'
+                    img2 = h2['img'] if h2 else '?'
+                    if img1 != img2: continue
+
+                    # Compare
+                    cand_ngrams = get_ngrams(candidate)
+                    if not base_ngrams or not cand_ngrams: continue
+                    
+                    intersection = len(base_ngrams.intersection(cand_ngrams))
+                    union = len(base_ngrams.union(cand_ngrams))
+                    sim = intersection / union if union > 0 else 0
+                    
+                    if sim >= 0.8:
+                        # MERGE!
+                        # 1. Add candidate loops to base
+                        base_group['loops'].extend(candidate['loops'])
+                        base_group['heat'] += candidate['heat']
+                        # 2. Update rep if candidate is bigger? No, keep base (higher rank)
+                        # 3. Mark processed
+                        merged_indices.add(j)
+                        # print(f"DEBUG: Merged {candidate['rep_agg'].header:x} into {base_group['rep_agg'].header:x} (Sim: {sim:.2f})")
+            
+            sorted_groups = final_groups
+            # Re-sort after merge
             sorted_groups.sort(key=lambda x: (x['prio'], x['heat']), reverse=True)
         
             # Summary: Categorized Views
@@ -1076,8 +1487,31 @@ class TraceParser:
                      func = m_h['func'][:20] + ".." if len(m_h['func']) > 20 else m_h['func']
                      img = m_h['img']
                      invocations = sum(l.invocations for l in group['loops'])
+                     
+                     # Merge CSV stats
+                     total_iters_csv = 0
+                     has_csv = False
+                     for l in group['loops']:
+                         # Extract PID from tids (set of (pid, tid))
+                         pid = list(l.tids)[0][0]
+                         for v in l.variants:
+                             rk = v.get('rank')
+                             if rk is not None:
+                                 if (pid, rk) in self.loops_csv_data:
+                                     total_iters_csv += self.loops_csv_data[(pid, rk)]
+                                     has_csv = True
+                                 
+                     if has_csv:
+                         invocations = f"{total_iters_csv} ({invocations})"
+                     else:
+                         # Fallback to LOOP_FINISH counts
+                         finish_iters = self.loop_finish_counts.get(agg.header, 0)
+                         if finish_iters > 0:
+                             invocations = f"{finish_iters} (Trace)"
                      insts = len(primary['entries'])
-                     activity = group.get('activity', '-')
+                     
+                     # Activity: Escape pipes for Markdown
+                     activity = group.get('activity', '-').replace('|', ',')
                      
                      # Global Rank
                      rank_val = getattr(agg, 'globalSeq', '?')
@@ -1085,14 +1519,14 @@ class TraceParser:
                      
                      # Debug Token Enhanced
                      m_1 = self.meta.get(primary['entries'][0]['ip'], {'asm':'?', 'mem_struct':None})
-                     head_skel = skeletonize_asm(m_1['asm'], m_1.get('mem_struct'))[:16].replace('|','!').replace(' ','')
+                     head_skel = skeletonize_asm(m_1['asm'], m_1.get('mem_struct'))[:32].replace('|','!').replace(' ','').replace('[','(').replace(']',')')
                      
-                     # SkelLen (rough approx via instr count, or use actual signature length from key if available?)
-                     # We can get sig len from primary
-                     sig_len = len(primary['entries']) # Assuming no filtered instructions in skel for now?
-                     # Actually skeletonize_asm is called per instruction. The list length IS the signature length.
+                     # SkelLen
+                     sig_len = len(primary['entries'])
+                     if 'sig' in group:
+                         sig_len = len(group['sig'])
                      
-                     debug_tok = f"`{head_skel}|{sig_len}|{insts}`"
+                     debug_tok = f"`{head_skel},{sig_len},{insts}`"
                      
                      print(f"| {i+1} | {rank_val} | {agg.header:x} | {img} | {func} | {invocations} | {insts} | {activity} | {debug_tok} |")
 
@@ -1112,17 +1546,8 @@ class TraceParser:
             if trunc_groups:
                 print_table("View C: Truncated / Long-Running Loops (Potential False Positives or Main Loops)", trunc_groups)
             
-            if not (app_groups or crypto_groups or runtime_groups or trunc_groups) and noise_groups:
-                 print("\n>> No High-Priority Loops found. Showing Top 5 Low-Priority (Noise) Groups as fallback.")
-                 print_table("View D: Top Noise Groups (Fallback)", noise_groups[:5])
-                 
-            hidden_low_count = len(noise_groups)
-            if not (app_groups or crypto_groups or runtime_groups or trunc_groups):
-                 hidden_low_count -= 5 
-                 if hidden_low_count < 0: hidden_low_count = 0
-        
-            if hidden_low_count > 0:
-                print(f"\n*(Hidden {hidden_low_count} Low-Priority/Noise Groups in Summary)*")
+            if noise_groups:
+                 print_table("View D: All Detected Low-Priority / System Loops (Full List)", noise_groups)
 
         
 
@@ -1262,11 +1687,12 @@ class TraceParser:
                 if self.loops_csv_data:
                      # Sum iterations for all variants in this group
                      for loop in group['loops']: # AggregatedLoop
+                         pid = list(loop.tids)[0][0]
                          for v in loop.variants:
                              rank = v.get('rank')
-                             if rank is not None and rank in self.loops_csv_data:
-                                 total_iters += self.loops_csv_data[rank]
-                                 has_csv_info = True
+                             if rank is not None and (pid, rank) in self.loops_csv_data:
+                                  total_iters += self.loops_csv_data[(pid, rank)]
+                                  has_csv_info = True
 
                 print("```text")
                 print(f"Loop Group Rank #{rank_counter} (Merged {len(group['loops'])} loops)")
@@ -1279,7 +1705,9 @@ class TraceParser:
                 else:
                      print(f"Executions: {total_invocations} (No CSV Iters data)")
                      
-                print(f"Structure: {len(primary['entries'])} instructions (Skeleton Hash: {hash(variant_sig):x})")
+                # Structure Hash (SHA256 for stability)
+                struct_hash = hashlib.sha256(str(group['sig']).encode('utf-8')).hexdigest()[:16]
+                print(f"Structure: {len(primary['entries'])} instructions (Skeleton Hash: {struct_hash})")
                 print(f"Activity: {group.get('activity', 'N/A')}")
                 print("```")
             
@@ -1464,22 +1892,72 @@ class TraceParser:
                 print("```")
                 print("\n---\n")
 
+import sys # Added import for sys
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--trace", required=True)
     parser.add_argument("--meta", required=True)
     parser.add_argument("--loops", help="Path to _loops.csv") # New
+    parser.add_argument("--output", help="Path to output report file (e.g., report.txt)") # New
     parser.add_argument("--llm", action="store_true") # Default action for now
     parser.add_argument("--full", action="store_true") # Ignored in this specialized version
     parser.add_argument("--all", action="store_true", help="Show all loops including system noise")
     
     args = parser.parse_args()
     
-    tp = TraceParser(args.meta, args.trace, args.all, args.loops)
-    tp.load_meta()
-    tp.load_loops_csv() # Load CSV
-    tp.parse_trace()
+    # redirect stdout if output file provided
+    if args.output:
+        sys.stdout = open(args.output, 'w', encoding='utf-8')
+
+    import glob
+    
+    # 1. Expand Glob / Auto-detect multiple traces (e.g. Parent/Child)
+    trace_files = []
+    if '*' in args.trace or '?' in args.trace:
+        trace_files = glob.glob(args.trace)
+    elif os.path.isfile(args.trace):
+        trace_files = [args.trace]
+    else:
+        # User provided prefix? e.g. "wc_all"
+        # Try to find all patterns
+        candidates = glob.glob(args.trace + "*_trace.txt")
+        if candidates:
+            trace_files = candidates
+        else:
+            # Maybe it is a full path without extension?
+            if os.path.exists(args.trace + "_trace.txt"):
+                 trace_files = [args.trace + "_trace.txt"]
+            else:
+                 print(f"[!] Could not find any trace files matching: {args.trace}")
+                 return
+
+    print(f"[*] Found {len(trace_files)} trace files to analyze: {trace_files}")
+
+    tp = TraceParser() # No args, load explicitly later
+    
+    for t_path in trace_files:
+        # Derive PID from filename if possible? "..._P1234_trace.txt"
+        pid = 0
+        p_match = re.search(r'_P(\d+)_trace\.txt$', t_path)
+        if p_match:
+            pid = int(p_match.group(1))
+        
+        # Derive other paths
+        base = t_path.replace("_trace.txt", "")
+        meta_path = base + "_meta.txt"
+        csv_path = base + "_loops.csv"
+        
+        if args.meta and len(trace_files) == 1: meta_path = args.meta
+        if args.loops and len(trace_files) == 1: csv_path = args.loops
+        
+        tp.load_session(pid, t_path, meta_path, csv_path)
+
     tp.dump_llm_report()
+    
+    if args.output:
+        sys.stdout.close()
+        sys.stdout = sys.__stdout__ # Restore
 
 if __name__ == "__main__":
     main()
