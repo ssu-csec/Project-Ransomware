@@ -74,6 +74,10 @@ WriteFile(HANDLE hFile, const void *lpBuffer, DWORD nNumberOfBytesToWrite,
 
 extern "C" __declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE hObject);
 
+extern "C" __declspec(dllimport) BOOL __stdcall
+MoveFileA(const char *lpExistingFileName, const char *lpNewFileName);
+extern "C" __declspec(dllimport) unsigned long long __stdcall GetTickCount64();
+
 extern "C" __declspec(dllimport) DWORD __stdcall GetLastError();
 
 typedef struct _MEMORY_BASIC_INFORMATION {
@@ -126,9 +130,13 @@ KNOB<UINT32> KnobMaxLoopIters(
     KNOB_MODE_WRITEONCE, "pintool", "break_iters", "0",
     "Max iterations before forcing loop exit (Loop Breaker, 0=Disabled)");
 
-KNOB<string> KnobPrefix(
-    KNOB_MODE_WRITEONCE, "pintool", "prefix", "trace",
-    "Output file prefix (can include folder, e.g. C:\\trace\\wc_all");
+KNOB<string>
+    KnobPrefix(KNOB_MODE_WRITEONCE, "pintool", "prefix", "trace",
+               "Output file prefix (can include folder, e.g. C:\\trace)");
+
+KNOB<string>
+    KnobSessionId(KNOB_MODE_WRITEONCE, "pintool", "session_id", "default",
+                  "Session ID to group parent and child process traces");
 
 // --- Legacy Knobs (Restored for compatibility) ---
 KNOB<UINT32> KnobMaxInsts(KNOB_MODE_WRITEONCE, "pintool", "max_insts", "500000",
@@ -357,10 +365,58 @@ static map<ADDRINT, StaticMeta *> *gMeta =
 static string *gTracePath = NULL; // Text Trace
 static MyWin::HANDLE gTraceHandle = MyWin::INVALID_HANDLE_VALUE;
 
+// Trace Chunking & Lifecycle globals
+static UINT32 gTraceSeq = 0;
+static string gSessionId = "";
+static unsigned long long gLastFlushTime = 0;
+static size_t gBytesInChunk = 0;
+static const size_t CHUNK_SIZE_LIMIT = 5 * 1024 * 1024;      // 5MB
+static const unsigned long long CHUNK_TIME_LIMIT_MS = 30000; // 30 seconds
+
 // -------------------- Optimization: Global Buffer & Fast Hex
 // --------------------
 static const size_t GLOBAL_BUF_SIZE = 64 * 1024; // 64KB buffer
 static string *gGlobalBuf = NULL;                // Protected by gTraceLock
+
+static string GetCurrentTracePath(bool isTmp) {
+  std::ostringstream oss;
+  string prefix = KnobPrefix.Value();
+  if (prefix.empty())
+    prefix = ".";
+  oss << prefix << "\\trace_" << gSessionId << "_" << PIN_GetPid() << "_"
+      << std::setfill('0') << std::setw(4) << gTraceSeq;
+  if (isTmp)
+    oss << ".tmp";
+  else
+    oss << ".done";
+  return oss.str();
+}
+
+static void RotateTraceFile() {
+  if (gTraceHandle != MyWin::INVALID_HANDLE_VALUE) {
+    // 1. Close current handle
+    MyWin::CloseHandle(gTraceHandle);
+    gTraceHandle = MyWin::INVALID_HANDLE_VALUE;
+
+    // 2. Rename .tmp to .done
+    string tmpPath = GetCurrentTracePath(true);
+    string donePath = GetCurrentTracePath(false);
+    MyWin::MoveFileA(tmpPath.c_str(), donePath.c_str());
+
+    // 3. Move to next sequence
+    gTraceSeq++;
+  }
+
+  // Open new .tmp file
+  string newTmp = GetCurrentTracePath(true);
+  gTraceHandle = MyWin::CreateFileA(
+      newTmp.c_str(), MyWin::GENERIC_WRITE,
+      MyWin::FILE_SHARE_READ | MyWin::FILE_SHARE_WRITE, NULL,
+      MyWin::CREATE_ALWAYS, MyWin::FILE_ATTRIBUTE_NORMAL, NULL);
+
+  gLastFlushTime = MyWin::GetTickCount64();
+  gBytesInChunk = 0;
+}
 
 static void FlushGlobalBuffer() {
   if (!gGlobalBuf || gGlobalBuf->empty())
@@ -371,8 +427,8 @@ static void FlushGlobalBuffer() {
   MyWin::DWORD written = 0;
   MyWin::WriteFile(gTraceHandle, gGlobalBuf->c_str(),
                    (MyWin::DWORD)gGlobalBuf->size(), &written, NULL);
+  gBytesInChunk += written;
   gGlobalBuf->clear();
-  // reserve to avoid realloc?
   if (gGlobalBuf->capacity() < GLOBAL_BUF_SIZE)
     gGlobalBuf->reserve(GLOBAL_BUF_SIZE);
 }
@@ -381,8 +437,6 @@ static void WriteGlobalTrace(const string &msg) {
   if (gTraceHandle == MyWin::INVALID_HANDLE_VALUE)
     return;
 
-  // Safe init check (just in case called before main init, though unlikely with
-  // locks)
   if (!gGlobalBuf)
     return;
 
@@ -391,6 +445,14 @@ static void WriteGlobalTrace(const string &msg) {
   if (gGlobalBuf->size() >= GLOBAL_BUF_SIZE) {
     FlushGlobalBuffer();
   }
+
+  unsigned long long now = MyWin::GetTickCount64();
+  if (gBytesInChunk >= CHUNK_SIZE_LIMIT ||
+      now > gLastFlushTime + CHUNK_TIME_LIMIT_MS) {
+    FlushGlobalBuffer();
+    RotateTraceFile();
+  }
+
   PIN_ReleaseLock(&gTraceLock);
 }
 
@@ -1686,14 +1748,18 @@ static void DumpStaticMeta() {
 static VOID OnFini(INT32, VOID *) {
   LogDebug("[DEBUG] OnFini step 1: entry");
 
-  LogDebug("[DEBUG] OnFini step 2: FlushGlobalBuffer");
+  LogDebug("[DEBUG] OnFini step 2: Finalize Trace Chunk");
+  PIN_GetLock(&gTraceLock, 1);
   FlushGlobalBuffer();
-
-  LogDebug("[DEBUG] OnFini step 3: CloseHandle");
   if (gTraceHandle != MyWin::INVALID_HANDLE_VALUE) {
     MyWin::CloseHandle(gTraceHandle);
     gTraceHandle = MyWin::INVALID_HANDLE_VALUE;
+    // Rename .tmp to .done for the final chunk
+    string tmpPath = GetCurrentTracePath(true);
+    string donePath = GetCurrentTracePath(false);
+    MyWin::MoveFileA(tmpPath.c_str(), donePath.c_str());
   }
+  PIN_ReleaseLock(&gTraceLock);
 
   // [SAFETY] Removed explicit gMeta/Loop memory cleanup (delete) during exit.
   // Manual pointer deletion in Pin's final exit phase can trigger crashes due
@@ -1780,43 +1846,16 @@ int main(int argc, char *argv[]) {
 
   // gCsvPath = gRunPrefix + "_loops.csv"; // REMOVED
 
-  // Generic naming for Ransomware Analysis
-  {
-    string path = gRunPrefix->c_str();
-    path += "_trace.txt";
-    gTracePath = new string(path);
-  }
-  // gMetaPath = gRunPrefix + "_meta.txt"; // REMOVED
-
-  // Open Meta File (REMOVED: Unified Trace)
-  // Open I/O Log (REMOVED: Unified Trace)
-
-  // Open Global Trace File with Protection (Restored)
-  {
-    string msg = "[DEBUG] Opening Trace File: " + *gTracePath;
-    LogDebug(msg);
-
-    gTraceHandle = MyWin::CreateFileA(
-        gTracePath->c_str(), MyWin::GENERIC_WRITE,
-        MyWin::FILE_SHARE_READ | MyWin::FILE_SHARE_WRITE, NULL,
-        MyWin::CREATE_ALWAYS, MyWin::FILE_ATTRIBUTE_NORMAL, NULL);
-
-    if (gTraceHandle ==
-        MyWin::INVALID_HANDLE_VALUE) // Simple error logging ignoring code to
-                                     // avoid C2264
-    {
-      LogDebug("[DEBUG] [ERROR] Failed to create trace file.");
-    } else {
-      LogDebug("[DEBUG] [SUCCESS] Trace file created.");
-    }
+  // Session ID INIT
+  gSessionId = KnobSessionId.Value();
+  if (gSessionId == "default" || gSessionId.empty()) {
+    gSessionId = "UnknownSession";
   }
 
-  // cerr << "[pin-loop] run_prefix: " << gRunPrefix->c_str() << endl;
-  // cerr << "[pin-loop] csv_path  : "
-  //      << (gCsvPath->empty() ? "(none)" : gCsvPath->c_str()) << endl;
-  // cerr << "[pin-loop] trace_path: " << gTracePath->c_str() << "
-  // (VISIBLE)"
-  //      << endl;
+  // Initialize first file
+  PIN_GetLock(&gTraceLock, 1);
+  RotateTraceFile();
+  PIN_ReleaseLock(&gTraceLock);
 
   // Marker (Unified Trace)
   {
