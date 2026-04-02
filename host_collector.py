@@ -9,8 +9,6 @@ import time
 import subprocess
 import argparse
 import datetime
-import concurrent.futures
-import concurrent.futures
 
 VMRUN = r"C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
 
@@ -48,10 +46,9 @@ def copy_from_guest(vmx, user, pwd, guest_path, host_path):
                             "CopyFileFromGuestToHost", vmx, guest_path, host_path)
     return rc == 0
 
-
-def delete_from_guest(vmx, user, pwd, guest_path):
-    """Delete a file inside the guest VM."""
-    rc, _, _ = vmrun_call("-T", "ws", "-gu", user, "-gp", pwd,
+def delete_guest_file(vmx, user, pwd, guest_path):
+    """Delete a file in guest after successful extraction."""
+    rc, _, err = vmrun_call("-T", "ws", "-gu", user, "-gp", pwd,
                             "deleteFileInGuest", vmx, guest_path)
     return rc == 0
 
@@ -77,101 +74,111 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     out_abs = os.path.abspath(args.out)
 
-    print("-" * 50)
-    log_msg(f"Ransomware Data Collector (FAST PARALLEL) Started")
-    log_msg(f"  Target VM: {args.vmx}")
-    log_msg(f"  Workers  : 4 (Safe Parallelism)")
-    log_msg(f"  Output   : {out_abs}")
-    print("-" * 50)
-    print("Press Ctrl+C to stop collection.\n")
+    log_msg(f"Started Host Collector V3")
+    log_msg(f"  VM       : {args.vmx}")
+    log_msg(f"  TraceDir : {args.trace_dir} (Monitoring .txt chunks, ignoring .tmp)")
+    log_msg(f"  DumpDir  : {args.dump_dir} (Recursive fetch for all regions)")
+    log_msg(f"  Host out : {out_abs}")
 
-    fetched_files = set()
-    tail_last_size = {} # Track size of .tmp files to avoid redundant small copies
+    fetched_files = set()   # keys: "trace/filename" or "dump/subdir/filename"
 
-    # Use a fixed-size pool to prevent overwhelming the host CPU/RAM
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        while True:
-            try:
-                # 1. Connection check (low impact)
-                rc, _, _ = vmrun_call("-T", "ws", "-gu", args.guest_user, "-gp", args.guest_pass, "listDirectoryInGuest", args.vmx, "C:\\")
-                if rc != 0:
-                    log_msg("Waiting for VM/VMware Tools...", "STATUS")
-                    time.sleep(5)
-                    continue
-
-                # 2. Get listings
-                trace_entries = list_dir_guest(args.vmx, args.guest_user, args.guest_pass, args.trace_dir)
-                dump_entries = list_dir_guest(args.vmx, args.guest_user, args.guest_pass, args.dump_dir)
-
-                futures = []
-
-                # --- Handle Trace Files ---
-                if trace_entries:
-                    for fname in trace_entries:
-                        # Finished chunks: Fetch then DELETE from VM to clear "Headache"
-                        if fname.endswith(".txt") or fname.endswith(".log"):
-                            key = f"trace/{fname}"
-                            if key not in fetched_files:
-                                g_path = f"{args.trace_dir}\\{fname}"
-                                h_path = os.path.join(out_abs, fname)
-                                
-                                # Define a task that copies and then deletes
-                                def fetch_and_cleanup(v, u, p, gp, hp):
-                                    if copy_from_guest(v, u, p, gp, hp):
-                                        delete_from_guest(v, u, p, gp)
-                                        return True
-                                    return False
-
-                                futures.append(executor.submit(fetch_and_cleanup, args.vmx, args.guest_user, args.guest_pass, g_path, h_path))
-                                fetched_files.add(key)
-
-                        # Live sample (Tail Tracking)
-                        elif fname.endswith(".tmp"):
-                            # We don't delete .tmp because Pin is writing to it.
-                            # But we only pull if it has grown significantly (e.g. 64KB)
-                            g_path = f"{args.trace_dir}\\{fname}"
-                            # We'd need the size from listDirectoryInGuest, but vmrun doesn't give it easily.
-                            # So we just pull it every 2-3 iterations or if we feel like it.
-                            # For now, let's just pull it but with less priority.
-                            h_path = os.path.join(out_abs, fname + ".live")
-                            executor.submit(copy_from_guest, args.vmx, args.guest_user, args.guest_pass, g_path, h_path)
-
-                # --- Handle Dump Folders ---
-                if dump_entries:
-                    for dname in dump_entries:
-                        if not dname.startswith("dump_") or "_tmp" in dname:
-                            continue
-                        
-                        g_subdir = f"{args.dump_dir}\\{dname}"
-                        h_subdir = os.path.join(out_abs, dname)
-                        os.makedirs(h_subdir, exist_ok=True)
-
-                        sub_files = list_dir_guest(args.vmx, args.guest_user, args.guest_pass, g_subdir)
-                        if sub_files:
-                            for fn in sub_files:
-                                key = f"dump/{dname}/{fn}"
-                                if key not in fetched_files:
-                                    hf = os.path.join(h_subdir, fn)
-                                    gf = f"{g_subdir}\\{fn}"
-                                    # Dumps are large, we fetch and keep (usually no need to delete immediately unless space is low)
-                                    futures.append(executor.submit(copy_from_guest, args.vmx, args.guest_user, args.guest_pass, gf, hf))
+    while True:
+        try:
+            # ─── 1. TRACE DIRECTORY (.txt ONLY, ignore .tmp) ────────────────
+            trace_entries = list_dir_guest(args.vmx, args.guest_user,
+                                           args.guest_pass, args.trace_dir)
+            if trace_entries is None:
+                log_msg("Cannot list trace dir (VM off or Tools issue?)", "WARN")
+            else:
+                for fname in trace_entries:
+                    # 1) Finished Chunks (.done)
+                    if fname.endswith(".done"):
+                        key = "trace/" + fname
+                        if key not in fetched_files:
+                            guest_path = args.trace_dir + "\\" + fname
+                            host_path  = os.path.join(out_abs, fname)
+                            ok = copy_from_guest(args.vmx, args.guest_user,
+                                                 args.guest_pass, guest_path, host_path)
+                            if ok:
+                                size = os.path.getsize(host_path) if os.path.exists(host_path) else -1
+                                if size >= 0:
+                                    log_msg(f"[TRACE] Finished Chunk Verified: {fname} ({size//1024} KB). Deleting on Guest.")
                                     fetched_files.add(key)
-                
-                # Report progress
-                if futures:
-                    finished, _ = concurrent.futures.wait(futures, timeout=30)
-                    success_count = sum(1 for f in finished if f.result())
-                    if success_count > 0:
-                        log_msg(f"Parallel Task: Successfully fetched and cleaned up {success_count} chunks.")
+                                    delete_guest_file(args.vmx, args.guest_user, args.guest_pass, guest_path)
+                                else:
+                                    log_msg(f"[TRACE] Verification failed for {fname}.", "WARN")
+                    
 
-            except KeyboardInterrupt:
-                log_msg("Stopping collector...")
-                break
-            except Exception as e:
-                log_msg(f"Loop Error: {e}", "ERROR")
+                    # 2) 현재 쓰는 중인 파일 (.tmp)
+                    #    .done 이 아니므로 게스트에서 삭제되지 않은 파일 = 아직 활성 상태
+                    #    매 폴링마다 덮어쓰기로 최신 내용을 가져옴
+                    #    파일 잠금으로 복사 실패하면 조용히 넘기고 다음 폴링에서 재시도
+                    elif fname.endswith(".tmp"):
+                        guest_path = args.trace_dir + "\\" + fname
+                        host_path  = os.path.join(out_abs, fname)
+                        ok = copy_from_guest(args.vmx, args.guest_user,
+                                             args.guest_pass, guest_path, host_path)
+                        if ok:
+                            size = os.path.getsize(host_path) if os.path.exists(host_path) else -1
+                            log_msg(f"[TRACE] Live snapshot: {fname} ({size//1024 if size >= 0 else '?'} KB)")
+                        # 실패 시 로그 없이 넘김 (잠금 중일 뿐, 다음 폴링에서 재시도)
 
-            time.sleep(args.interval)
+
+            # ─── 2. DUMP DIRECTORIES (Recursive fetch) ──────────────────────
+            dump_entries = list_dir_guest(args.vmx, args.guest_user,
+                                          args.guest_pass, args.dump_dir)
+            if dump_entries is not None:
+                for dname in dump_entries:
+                    # Ignore partial folders (dumper use _tmp suffix while writing)
+                    if "_tmp" in dname:
+                        continue
+                    if not dname.startswith("dump_"):
+                        continue
+
+                    # Traverse inside dump_000, dump_001...
+                    guest_subdir = args.dump_dir + "\\" + dname
+                    host_subdir  = os.path.join(out_abs, dname)
+                    os.makedirs(host_subdir, exist_ok=True)
+
+                    sub_files = list_dir_guest(args.vmx, args.guest_user,
+                                               args.guest_pass, guest_subdir)
+                    if sub_files is None:
+                        continue
+
+                    any_new = False
+                    for fn in sub_files:
+                        key = f"dump/{dname}/{fn}"
+                        if key in fetched_files:
+                            continue
+
+                        # Check if host already has it (crash recovery)
+                        hf = os.path.join(host_subdir, fn)
+                        if os.path.exists(hf) and os.path.getsize(hf) > 0:
+                            fetched_files.add(key)
+                            continue
+
+                        gf = guest_subdir + "\\" + fn
+                        ok = copy_from_guest(args.vmx, args.guest_user,
+                                             args.guest_pass, gf, hf)
+                        if ok:
+                            fetched_files.add(key)
+                            any_new = True
+                        else:
+                            # File might be locked by memory dumper
+                            pass
+                    
+                    if any_new:
+                        log_msg(f"[DUMP ] Synced folder: {dname}")
+
+        except KeyboardInterrupt:
+            log_msg("Stopped by user.")
+            break
+        except Exception as e:
+            log_msg(f"Error: {e}", "ERROR")
+
+        time.sleep(args.interval)
 
 
 if __name__ == "__main__":
     main()
+    
