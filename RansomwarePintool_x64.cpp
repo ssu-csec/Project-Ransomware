@@ -71,6 +71,10 @@ WriteFile(HANDLE hFile, const void *lpBuffer, DWORD nNumberOfBytesToWrite,
 
 extern "C" __declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE hObject);
 
+extern "C" __declspec(dllimport) BOOL __stdcall
+MoveFileA(const char *lpExistingFileName, const char *lpNewFileName);
+extern "C" __declspec(dllimport) unsigned long long __stdcall GetTickCount64();
+
 extern "C" __declspec(dllimport) DWORD __stdcall GetLastError();
 
 typedef struct _MEMORY_BASIC_INFORMATION {
@@ -119,9 +123,13 @@ KNOB<UINT32> KnobMaxLoopIters(
     KNOB_MODE_WRITEONCE, "pintool", "break_iters", "0",
     "Max iterations before forcing loop exit (Loop Breaker, 0=Disabled)");
 
-KNOB<string> KnobPrefix(
-    KNOB_MODE_WRITEONCE, "pintool", "prefix", "trace",
-    "Output file prefix (can include folder, e.g. C:\\trace\\wc_all");
+KNOB<string>
+    KnobPrefix(KNOB_MODE_WRITEONCE, "pintool", "prefix", "trace",
+               "Output file prefix (can include folder, e.g. C:\\trace)");
+
+KNOB<string>
+    KnobSessionId(KNOB_MODE_WRITEONCE, "pintool", "session_id", "default",
+                  "Session ID to group parent and child process traces");
 
 // --- Legacy Knobs (Restored for compatibility) ---
 KNOB<UINT32> KnobMaxInsts(KNOB_MODE_WRITEONCE, "pintool", "max_insts", "500000",
@@ -326,6 +334,50 @@ static string *gTracePath = NULL; // Text Trace
 static MyWin::HANDLE gTraceHandle = MyWin::INVALID_HANDLE_VALUE;
 static PIN_LOCK gTraceLock;
 
+// Trace Chunking & Lifecycle globals
+static UINT32 gTraceSeq = 0;
+static string gSessionId = "";
+static unsigned long long gLastFlushTime = 0;
+static size_t gBytesInChunk = 0;
+static const size_t CHUNK_SIZE_LIMIT = 5 * 1024 * 1024;      // 5MB limit
+static const unsigned long long CHUNK_TIME_LIMIT_MS = 30000; // 30 seconds
+
+static string GetCurrentTracePath(bool isTmp) {
+  std::ostringstream oss;
+  string prefix = KnobPrefix.Value();
+  if (prefix.empty())
+    prefix = ".";
+  oss << prefix << "\\trace_" << gSessionId << "_" << PIN_GetPid() << "_"
+      << std::setfill('0') << std::setw(4) << gTraceSeq;
+  if (isTmp)
+    oss << ".tmp";
+  else
+    oss << ".done";
+  return oss.str();
+}
+
+static void RotateTraceFile() {
+  if (gTraceHandle != MyWin::INVALID_HANDLE_VALUE) {
+    MyWin::CloseHandle(gTraceHandle);
+    gTraceHandle = MyWin::INVALID_HANDLE_VALUE;
+
+    string tmpPath = GetCurrentTracePath(true);
+    string donePath = GetCurrentTracePath(false);
+    MyWin::MoveFileA(tmpPath.c_str(), donePath.c_str());
+
+    gTraceSeq++;
+  }
+
+  string newTmp = GetCurrentTracePath(true);
+  gTraceHandle = MyWin::CreateFileA(
+      newTmp.c_str(), MyWin::GENERIC_WRITE,
+      MyWin::FILE_SHARE_READ | MyWin::FILE_SHARE_WRITE, NULL,
+      MyWin::CREATE_ALWAYS, MyWin::FILE_ATTRIBUTE_NORMAL, NULL);
+
+  gLastFlushTime = MyWin::GetTickCount64();
+  gBytesInChunk = 0;
+}
+
 // Helper: Global Write to Trace (Thread-Safe)
 static void WriteGlobalTrace(const string &msg) {
   if (gTraceHandle == MyWin::INVALID_HANDLE_VALUE)
@@ -334,6 +386,13 @@ static void WriteGlobalTrace(const string &msg) {
   MyWin::DWORD written = 0;
   MyWin::WriteFile(gTraceHandle, msg.c_str(), (MyWin::DWORD)msg.size(),
                    &written, NULL);
+  gBytesInChunk += written;
+
+  unsigned long long now = MyWin::GetTickCount64();
+  if (gBytesInChunk >= CHUNK_SIZE_LIMIT ||
+      now > gLastFlushTime + CHUNK_TIME_LIMIT_MS) {
+    RotateTraceFile();
+  }
   PIN_ReleaseLock(&gTraceLock);
 }
 
@@ -1582,15 +1641,17 @@ static void DumpStaticMeta() {
 static VOID OnFini(INT32, VOID *) {
   LogDebug("[DEBUG] OnFini step 1: entry");
 
-  // [MISSING FIX] Added FlushGlobalBuffer call if exists, or sync with 32-bit.
-  // In 64-bit, we don't have a separate FlushGlobalBuffer yet, but we'll ensure
-  // close handle is safe.
-
-  LogDebug("[DEBUG] OnFini step 2: CloseHandle");
+  LogDebug("[DEBUG] OnFini step 2: Finalize Trace Chunk");
+  PIN_GetLock(&gTraceLock, 1);
   if (gTraceHandle != MyWin::INVALID_HANDLE_VALUE) {
     MyWin::CloseHandle(gTraceHandle);
     gTraceHandle = MyWin::INVALID_HANDLE_VALUE;
+    // Rename .tmp to .done for the final chunk
+    string tmpPath = GetCurrentTracePath(true);
+    string donePath = GetCurrentTracePath(false);
+    MyWin::MoveFileA(tmpPath.c_str(), donePath.c_str());
   }
+  PIN_ReleaseLock(&gTraceLock);
 
   // [SAFETY] Removed explicit gMeta cleanup to prevent shutdown race crashes.
   LogDebug("[DEBUG] OnFini step 3: complete");
@@ -1672,27 +1733,20 @@ int main(int argc, char *argv[]) {
   // Open Meta File (REMOVED: Unified Trace)
   // Open I/O Log (REMOVED: Unified Trace)
 
-  // Open Global Trace File with Protection (Restored)
-  {
-    cerr << "[pin-loop] Opening trace file: " << *gTracePath << endl;
-
-    gTraceHandle = MyWin::CreateFileA(
-        gTracePath->c_str(), MyWin::GENERIC_WRITE,
-        MyWin::FILE_SHARE_READ | MyWin::FILE_SHARE_WRITE, NULL,
-        MyWin::CREATE_ALWAYS, MyWin::FILE_ATTRIBUTE_NORMAL, NULL);
-
-    if (gTraceHandle == MyWin::INVALID_HANDLE_VALUE) {
-      MyWin::DWORD err = MyWin::GetLastError();
-      cerr << "[pin-loop] [ERROR] Failed to create protected trace file: "
-           << *gTracePath << " ErrorCode=" << err << endl;
-    } else {
-      cerr << "[pin-loop] [SUCCESS] Trace file created." << endl;
-    }
+  // Session ID INIT
+  gSessionId = KnobSessionId.Value();
+  if (gSessionId == "default" || gSessionId.empty()) {
+    gSessionId = "UnknownSession";
   }
+
+  // Initialize first file
+  PIN_GetLock(&gTraceLock, 1);
+  RotateTraceFile();
+  PIN_ReleaseLock(&gTraceLock);
 
   cerr << "[pin-loop] run_prefix: " << *gRunPrefix << endl;
   cerr << "[pin-loop] csv_path  : " << *gCsvPath << endl;
-  cerr << "[pin-loop] trace_path: " << *gTracePath << " (VISIBLE)" << endl;
+  cerr << "[pin-loop] Trace Session Started: " << gSessionId << endl;
 
   // Marker (Unified Trace)
   {
