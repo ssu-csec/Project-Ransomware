@@ -193,14 +193,7 @@ class MemoryDumper:
                 
         print("[*] Memory dump complete.")
         
-        # Rename directory from _tmp to indicate completion for Host Collector
-        if out_dir.endswith("_tmp"):
-            final_dir = out_dir[:-4]
-            try:
-                os.rename(out_dir, final_dir)
-                print(f"[*] Renamed to {final_dir} for host extraction.")
-            except Exception as e:
-                print(f"[!] Failed to rename directory: {e}")
+        print("[*] Memory dump complete. (Rename deferred to monitor script)")
 
     def __del__(self):
         if hasattr(self, 'h_process') and self.h_process:
