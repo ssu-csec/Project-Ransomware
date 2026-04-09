@@ -80,46 +80,49 @@ def main():
         log_msg(f"Cannot find dumper script at: {dumper_script}")
         sys.exit(1)
         
-    # 주기적 덤프 루프 (프로세스 종료 시까지 30초 간격으로 수행)
+    # 주기적 덤프 루프 (최신 덤프 파일만 유지, 이전 파일은 삭제/교체)
+    import shutil
     dump_count = 0
     while True:
-        timestamp_dir = os.path.join(args.out, f"dump_{dump_count:03d}_tmp")
+        timestamp_dir = os.path.join(args.out, "dump_latest_tmp")
+        final_dir = os.path.join(args.out, "dump_latest")
+        
+        # 이전 임시 폴더 잔여물 정리
+        if os.path.exists(timestamp_dir):
+            shutil.rmtree(timestamp_dir, ignore_errors=True)
         
         # 메모리 덤퍼 스크립트 실행
         cmd = [sys.executable, dumper_script, str(pid), "--out", timestamp_dir]
         try:
-            log_msg(f"Running dump iteration #{dump_count}...")
-            # Capture output
+            log_msg(f"Running dump iteration #{dump_count}... (Overwriting previous)")
             result = subprocess.run(cmd, check=False, capture_output=True, text=True)
             if result.stdout:
                 log_msg(f"[Dumper out] {result.stdout.strip()}")
             if result.stderr:
                 log_msg(f"[Dumper err] {result.stderr.strip()}")
             
-            # 덤퍼 스크립트가 비정상 종료 시 (프로세스가 죽거나 권한 상실) 모니터링 종료
             if result.returncode != 0:
-                log_msg(f"Dumper exited with error code {result.returncode}. Assuming process is dead. Exiting.")
+                log_msg(f"Dumper exited with error code {result.returncode}. Assuming process is dead. Exiting monitor.")
                 break
                 
-            # ── 덤프 완료 후 _tmp 접미사 제거 ─────────────────────────────────
-            # host_collector.py는 "_tmp" 가 없는 폴더만 수집함
-            final_dir = timestamp_dir.replace("_tmp", "")
-            if os.path.exists(timestamp_dir) and not os.path.exists(final_dir):
+            # 기존 완료 폴더 삭제 후 새 덤프로 덮어쓰기
+            if os.path.exists(timestamp_dir):
+                if os.path.exists(final_dir):
+                    shutil.rmtree(final_dir, ignore_errors=True)
                 try:
                     os.rename(timestamp_dir, final_dir)
-                    log_msg(f"[Rename] {os.path.basename(timestamp_dir)} → {os.path.basename(final_dir)}")
+                    log_msg(f"[Rename] Updated {os.path.basename(final_dir)} with latest memory dump.")
                 except Exception as re_err:
-                    log_msg(f"[WARN] Rename 실패: {re_err} (이미 존재하거나 잠겨있을 수 있음)")
-            # ──────────────────────────────────────────────────────────────────
-            log_msg(f"Auto-dump #{dump_count} successfully completed for {args.target}.")
+                    log_msg(f"[WARN] Rename 실패: {re_err} (이미 사용 중일 수 있음)")
+            
+            log_msg(f"Auto-dump #{dump_count} successfully replaced the previous dump for {args.target}.")
         except Exception as e:
             log_msg(f"Auto-dump failed with exception: {e}")
             break
-
             
         dump_count += 1
-        log_msg(f"Sleeping 30 seconds before next dump...")
-        time.sleep(30)
+        log_msg(f"Sleeping 10 minutes (600 seconds) before next dump...")
+        time.sleep(600)
 
 if __name__ == "__main__":
     main()
