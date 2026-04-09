@@ -17,6 +17,19 @@ def log_msg(msg):
     except:
         pass
 
+import stat
+def on_rm_error(func, path, exc_info):
+    """
+    Error handler for shutil.rmtree.
+    If the error is due to an access error (read only file),
+    it attempts to add write permission and then retries.
+    """
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception as e:
+        log_msg(f"[WARN] Failed to delete {path}: {e}")
+
 def get_pid_by_name(process_name):
     try:
         output = subprocess.check_output(f'tasklist /FI "IMAGENAME eq {process_name}" /NH /FO CSV', shell=True).decode('ansi', errors='ignore')
@@ -89,7 +102,7 @@ def main():
         
         # 이전 임시 폴더 잔여물 정리
         if os.path.exists(timestamp_dir):
-            shutil.rmtree(timestamp_dir, ignore_errors=True)
+            shutil.rmtree(timestamp_dir, onerror=on_rm_error)
         
         # 메모리 덤퍼 스크립트 실행
         cmd = [sys.executable, dumper_script, str(pid), "--out", timestamp_dir]
@@ -108,7 +121,7 @@ def main():
             # 기존 완료 폴더 삭제 후 새 덤프로 덮어쓰기
             if os.path.exists(timestamp_dir):
                 if os.path.exists(final_dir):
-                    shutil.rmtree(final_dir, ignore_errors=True)
+                    shutil.rmtree(final_dir, onerror=on_rm_error)
                 try:
                     os.rename(timestamp_dir, final_dir)
                     log_msg(f"[Rename] Updated {os.path.basename(final_dir)} with latest memory dump.")
