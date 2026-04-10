@@ -109,20 +109,9 @@ def main():
                                     log_msg(f"[TRACE] Verification failed for {fname}.", "WARN")
                     
 
-                    # 2) 현재 쓰는 중인 파일 (.tmp)
-                    #    .done 이 아니므로 게스트에서 삭제되지 않은 파일 = 아직 활성 상태
-                    #    매 폴링마다 덮어쓰기로 최신 내용을 가져옴
-                    #    파일 잠금으로 복사 실패하면 조용히 넘기고 다음 폴링에서 재시도
                     elif fname.endswith(".tmp"):
-                        guest_path = args.trace_dir + "\\" + fname
-                        host_path  = os.path.join(out_abs, fname)
-                        ok = copy_from_guest(args.vmx, args.guest_user,
-                                             args.guest_pass, guest_path, host_path)
-                        if ok:
-                            size = os.path.getsize(host_path) if os.path.exists(host_path) else -1
-                            log_msg(f"[TRACE] Live snapshot: {fname} ({size//1024 if size >= 0 else '?'} KB)")
-                        # 실패 시 로그 없이 넘김 (잠금 중일 뿐, 다음 폴링에서 재시도)
-
+                        # 사용자의 요청에 따라 활성 중인 .tmp 파일은 호스트로 복사하지 않음 (잠금 충돌 방지)
+                        pass
 
             # ─── 2. DUMP DIRECTORIES (Recursive fetch) ──────────────────────
             dump_entries = list_dir_guest(args.vmx, args.guest_user,
@@ -169,6 +158,18 @@ def main():
                     
                     if any_new:
                         log_msg(f"[DUMP ] Synced folder: {dname}")
+                
+                # 호스트 측 덤프 폴더 정리 (최신 2개만 유지)
+                import shutil
+                host_dumps = [os.path.join(out_abs, d) for d in os.listdir(out_abs) if d.startswith("dump_") and "_tmp" not in d and os.path.isdir(os.path.join(out_abs, d))]
+                if len(host_dumps) > 2:
+                    host_dumps.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+                    for old_dump in host_dumps[2:]:
+                        try:
+                            shutil.rmtree(old_dump, ignore_errors=True)
+                            log_msg(f"[DUMP ] Cleaned up old host dump folder: {os.path.basename(old_dump)}")
+                        except:
+                            pass
 
         except KeyboardInterrupt:
             log_msg("Stopped by user.")
