@@ -66,7 +66,8 @@ def main():
                 if not blocks:
                     continue
                     
-                target_addr = slice_obj.get("target_address", 0)
+                # context_slicer.py의 출력 키는 'target' 입니다.
+                target_addr = slice_obj.get("target", 0)
                 if isinstance(target_addr, int):
                     addr_key = hex(target_addr)
                 else:
