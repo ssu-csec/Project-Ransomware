@@ -30,7 +30,7 @@ def get_protection_str(protect):
     if protect & PAGE_EXECUTE: return "X"
     if protect & PAGE_READWRITE: return "RW"
     if protect & PAGE_READONLY: return "R"
-    return "??"
+    return "UNKNOWN"
 
 # --- ctypes 구조체 ---
 class MEMORY_BASIC_INFORMATION(ctypes.Structure):
