@@ -187,15 +187,17 @@ class MemoryDumper:
                 # 덤프 파일에도 읽기 전용 속성 부여 (랜섬웨어 방어)
                 ctypes.windll.kernel32.SetFileAttributesW(dump_path, 1)
             else:
-                print(f"[!] Read failed for region {hex(base_addr)} (Error {ctypes.get_last_error()}). success={success}, bytes_read={bytes_read.value}")
+                err_code = ctypes.get_last_error()
+                # Error 299 (PARTIAL_COPY)는 예약/보호된 구역을 무차별 읽을 때 흔하므로 무시
+                if err_code != 299:
+                    print(f"[!] Read failed for region {hex(base_addr)} (Error {err_code}).")
                 continue
                 
-        print("[*] Memory dump complete.")
+        print("[*] Chunk memory dump complete.")
         
         # --- 추가 기능: 윈도우 표준 미니덤프(Full Memory + Handles) 생성 ---
-        # 핀툴(루프 위주)의 단점을 보완하기 위해 스레드 콜스택과 열린 파일 핸들(행위 증거)을 담은 표준 dmp 생성
         try:
-            print("[*] Creating standard Windows Minidump (.dmp) with handles for behavioral analysis...")
+            print("[*] Creating standard Windows Minidump (.dmp) for behavioral analysis...")
             dbghelp = ctypes.WinDLL("Dbghelp.dll", use_last_error=True)
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             
@@ -204,7 +206,7 @@ class MemoryDumper:
             FILE_ATTRIBUTE_NORMAL = 0x80
             INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
             
-            # MiniDumpWithFullMemory (2) | MiniDumpWithHandleData (4) | MiniDumpWithThreadInfo (0x1000)
+            # MiniDumpWithFullMemory(2) | MiniDumpWithHandleData(4) | MiniDumpWithThreadInfo(0x1000)
             MINIDUMP_TYPE = 2 | 4 | 0x1000
             
             dmp_path = os.path.join(out_dir, "behavioral_context.dmp")
@@ -218,17 +220,27 @@ class MemoryDumper:
                 dbghelp.MiniDumpWriteDump.restype = wintypes.BOOL
                 
                 success = dbghelp.MiniDumpWriteDump(self.h_process, self.pid, h_file, MINIDUMP_TYPE, None, None, None)
+                
+                # 권한 부족(0x80070005) 시 일반 덤프(0)로 강등 재시도
+                if not success:
+                    err = ctypes.get_last_error()
+                    if err == 5 or err == -2147024891: # Access Denied / E_ACCESSDENIED
+                        print("[!] Access denied on Full Minidump (Not running as Admin?). Trying basic dump...")
+                        kernel32.SetFilePointer(h_file, 0, None, 0)
+                        kernel32.SetEndOfFile(h_file)
+                        success = dbghelp.MiniDumpWriteDump(self.h_process, self.pid, h_file, 0, None, None, None)
+                
                 kernel32.CloseHandle(h_file)
                 if success:
                     print(f"[*] Standard Minidump created successfully: {dmp_path}")
                 else:
-                    print(f"[!] MiniDumpWriteDump failed with error: {ctypes.get_last_error()}")
+                    print(f"[!] MiniDumpWriteDump finally failed! Error: {ctypes.get_last_error()}")
             else:
-                print(f"[!] Failed to create .dmp file: {ctypes.get_last_error()}")
+                print(f"[!] Failed to open .dmp file handle: {ctypes.get_last_error()}")
         except Exception as e:
             print(f"[!] Minidump creation exception: {e}")
             
-        print("[*] Memory dump complete. (Rename deferred to monitor script)")
+        print("[*] Memory dumping sequence finished. (Rename deferred to monitor script)")
 
     def __del__(self):
         if hasattr(self, 'h_process') and self.h_process:
