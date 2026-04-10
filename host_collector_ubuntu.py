@@ -110,13 +110,8 @@ def main():
                                     log_msg(f"[TRACE] Verification failed for {fname}.", "WARN")
                     
                     elif fname.endswith(".tmp"):
-                        guest_path = args.trace_dir + "\\" + fname
-                        host_path  = os.path.join(out_abs, fname)
-                        ok = copy_from_guest(args.vmx, args.guest_user,
-                                             args.guest_pass, guest_path, host_path)
-                        if ok:
-                            size = os.path.getsize(host_path) if os.path.exists(host_path) else -1
-                            log_msg(f"[TRACE] Live snapshot: {fname} ({size//1024 if size >= 0 else '?'} KB)")
+                        # 사용자의 요청에 따라 활성 중인 .tmp 파일은 호스트로 복사하지 않음 (잠금 충돌 방지)
+                        pass
 
             # 2. DUMP DIRECTORIES
             dump_entries = list_dir_guest(args.vmx, args.guest_user,
@@ -157,6 +152,18 @@ def main():
                     
                     if any_new:
                         log_msg(f"[DUMP ] Synced folder: {dname}")
+                
+                # 호스트 측 덤프 폴더 정리 (최신 2개 폴더만 유지)
+                import shutil
+                host_dumps = [os.path.join(out_abs, d) for d in os.listdir(out_abs) if d.startswith("dump_") and "_tmp" not in d and os.path.isdir(os.path.join(out_abs, d))]
+                if len(host_dumps) > 2:
+                    host_dumps.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+                    for old_dump in host_dumps[2:]:
+                        try:
+                            shutil.rmtree(old_dump, ignore_errors=True)
+                            log_msg(f"[DUMP ] Cleaned up old host dump folder: {os.path.basename(old_dump)}")
+                        except:
+                            pass
 
         except KeyboardInterrupt:
             log_msg("Stopped by user.")
