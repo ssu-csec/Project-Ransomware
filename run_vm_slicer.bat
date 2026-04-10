@@ -10,7 +10,7 @@ echo.
 :: 경로 수동 입력받기
 set /p CONTEXT_SLICER="1. context_slicer.py 파일의 전체 경로를 입력하세요: "
 echo.
-set /p DUMP_DIR="2. 덤프 폴더(예: C:\Users\user\Downloads\Build\dump_workspace\dump_000) 경로를 입력하세요: "
+set /p DUMP_DIR="2. 덤프 최상위 폴더 (예: C:\Users\user\Downloads\Build\dump_workspace) 경로를 입력하세요: "
 echo.
 set /p TARGET_JSON="3. 방금 생성된 target_cfg_blocks.json 파일 경로를 입력하세요: "
 echo.
