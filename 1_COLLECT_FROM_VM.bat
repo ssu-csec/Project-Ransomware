@@ -10,7 +10,7 @@ echo [*] 호스트 데이터 수집기를 가동합니다.
 echo.
 
 :: --- [사용자 설정 항목] ---
-set "VMX_PATH=C:\Users\user\Documents\Virtual Machines\Clone of Clone of Windows 10 x64 (4) (2)\Clone of Clone of Windows 10 x64 (4) (2).vmx"
+set "VMX_PATH=C:\Users\user\Documents\Virtual Machines\Ransomware_Test\Ransomware_Test.vmx"
 set "GUEST_USER=user"
 set "GUEST_PASS=1234"
 set "LOOT_DIR=C:\Users\user\Desktop\Ransom_Analysis_folder"
