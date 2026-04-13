@@ -47,13 +47,13 @@ def delete_guest_file(vmx, user, pwd, guest_path):
     return rc == 0
 
 def main():
-    parser = argparse.ArgumentParser(description="Ubuntu Host Collector for 5 experimental Windows VMs")
-    parser.add_argument("vmx",        help="Path to the .vmx file on Ubuntu (e.g., /home/user/vms/vm1/Windows10.vmx)")
-    parser.add_argument("guest_user", help="Guest Windows username")
-    parser.add_argument("guest_pass", help="Guest Windows password")
+    parser = argparse.ArgumentParser(description="Ubuntu Host Collector for experimental Windows VMs")
+    parser.add_argument("--vmx",        help="Path to the .vmx file on Ubuntu")
+    parser.add_argument("--guest-user", help="Guest Windows username")
+    parser.add_argument("--guest-pass", help="Guest Windows password")
     
     # 여러 대의 VM을 실험하므로 구분하기 쉬운 폴더 할당 기능 추가
-    parser.add_argument("--vm-name",  help="Name of the experimental VM (e.g., VM01). Creates a specific child folder in --out.")
+    parser.add_argument("--vm-name",  help="Name of the experimental VM (e.g., VM01).")
     
     parser.add_argument("--trace-dir",
                         default=r"C:\Users\user\trace",
@@ -65,7 +65,38 @@ def main():
                         help="Host output base directory (Ubuntu path, default: ./loot)")
     parser.add_argument("--interval", type=int, default=3,
                         help="Polling interval in seconds")
-    args = parser.parse_args()
+    
+    # Parse existing args
+    args, unknown = parser.parse_known_args()
+
+    # 대화형 입력 처리 (명령줄 인자가 없을 경우)
+    print("="*60)
+    print(" Ubuntu Ransomware Data Host Collector (대화형 모드)")
+    print("="*60)
+    
+    if not args.vmx:
+        args.vmx = input("1. VMX 파일 경로를 입력(또는 복사해서 붙여넣기)하세요: ").strip().replace('"', '').replace("'", "")
+        if not args.vmx:
+            print("[ERROR] VMX 경로가 필요합니다.")
+            sys.exit(1)
+
+    if not args.out or args.out == "./loot":
+        user_out = input("2. 호스트 저장 저장 절대 경로를 입력하세요 (엔터 시 ./loot): ").strip().replace('"', '').replace("'", "")
+        if user_out: args.out = user_out
+
+    if not args.guest_user:
+        user_input = input("3. VM 윈도우 계정명 (엔터 시 기본값 user): ").strip()
+        args.guest_user = user_input if user_input else "user"
+
+    if not args.guest_pass:
+        pass_input = input("4. VM 윈도우 비밀번호 (엔터 시 기본값 1234): ").strip()
+        args.guest_pass = pass_input if pass_input else "1234"
+    
+    if not args.vm_name:
+        name_input = input("5. 실험 VM 이름 (엔터 시 폴더 분리 안 함): ").strip()
+        if name_input: args.vm_name = name_input
+    
+    print("-"*60)
 
     # 호스트 저장 폴더 결정 (vm-name 파라미터가 있다면 서브폴더로 분리)
     if args.vm_name:
