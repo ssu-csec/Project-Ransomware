@@ -105,20 +105,39 @@ def main():
     args.trace_dir = trace_dir
     args.dump_dir = dump_dir
 
-    # 호스트 저장 폴더 결정 (vm-name 파라미터가 있다면 서브폴더로 분리)
-    if args.vm_name:
-        target_out_dir = os.path.join(args.out, args.vm_name)
-    else:
-        target_out_dir = args.out
+    # --- [자동 증분 로직 시작] ---
+    # 1. VM 이름 자동 결정 (vm-name 파라미터가 없다면 VM01, VM02... 자동 생성)
+    if not args.vm_name:
+        idx = 1
+        while True:
+            candidate = f"VM{idx:02d}"
+            if not os.path.exists(os.path.join(args.out, candidate)):
+                args.vm_name = candidate
+                break
+            idx += 1
+    
+    vm_dir = os.path.join(args.out, args.vm_name)
+    os.makedirs(vm_dir, exist_ok=True)
+
+    # 2. 리포트 회차 자동 결정 (report1, report2... 자동 생성)
+    report_idx = 1
+    while True:
+        report_dir_name = f"report{report_idx}"
+        candidate_path = os.path.join(vm_dir, report_dir_name)
+        if not os.path.exists(candidate_path):
+            target_out_dir = candidate_path
+            break
+        report_idx += 1
 
     os.makedirs(target_out_dir, exist_ok=True)
     out_abs = os.path.abspath(target_out_dir)
+    # --- [자동 증분 로직 종료] ---
 
     log_msg(f"Started Ubuntu Host Collector")
     log_msg(f"  VM File  : {args.vmx}")
     log_msg(f"  TraceDir : {args.trace_dir} (Guest)")
     log_msg(f"  DumpDir  : {args.dump_dir} (Guest)")
-    log_msg(f"  Host Out : {out_abs} (Target Folder)")
+    log_msg(f"  Host Out : {out_abs} (Session Folder)")
 
     fetched_files = set()
 
