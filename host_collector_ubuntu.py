@@ -174,11 +174,13 @@ def main():
             dump_entries = list_dir_guest(args.vmx, args.guest_user,
                                           args.guest_pass, args.dump_dir)
             if dump_entries is not None:
-                for dname in dump_entries:
-                    if "_tmp" in dname:
-                        continue
-                    if not dname.startswith("dump_"):
-                        continue
+                # 필터링: _tmp는 제외하고, dump_로 시작하거나 최신/백업 폴더(latest, old)인 것만 처리
+                valid_guest_dumps = [d for d in dump_entries if "_tmp" not in d and (d.startswith("dump_") or d == "dump_latest" or d == "dump_old")]
+                
+                if len(valid_guest_dumps) > 0:
+                    log_msg(f"Found {len(valid_guest_dumps)} dump folders on guest: {', '.join(valid_guest_dumps)}")
+                
+                for dname in valid_guest_dumps:
 
                     guest_subdir = args.dump_dir + "\\" + dname
                     host_subdir  = os.path.join(out_abs, dname)
