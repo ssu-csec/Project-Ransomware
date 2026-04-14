@@ -22,16 +22,22 @@ def vmrun_call(*args):
     """Run vmrun with given args. Returns (returncode, stdout, stderr)."""
     exe = VMRUN if os.path.exists(VMRUN) else "vmrun"
     cmd = [exe] + list(args)
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    return r.returncode, r.stdout.strip(), r.stderr.strip()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            # 에러 발생 시 모든 출력(stdout, stderr)을 로그에 남김
+            log_msg(f"vmrun failed (RC={r.returncode})", "ERROR")
+            if r.stdout.strip(): log_msg(f"STDOUT: {r.stdout.strip()}", "ERROR")
+            if r.stderr.strip(): log_msg(f"STDERR: {r.stderr.strip()}", "ERROR")
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except FileNotFoundError:
+        log_msg(f"Required command '{exe}' not found. Please check if VMware Workstation is installed.", "ERROR")
+        return -1, "", "Executable not found"
 
 def list_dir_guest(vmx, user, pwd, guest_dir):
     rc, out, err = vmrun_call("-T", "ws", "-gu", user, "-gp", pwd,
                               "listDirectoryInGuest", vmx, guest_dir)
     if rc != 0:
-        # 에러 메시지가 있을 경우 출력하여 원인 파악 도움
-        if err:
-            log_msg(f"vmrun error: {err}", "ERROR")
         return None
     lines = out.splitlines()
     if not lines or "Directory list" not in lines[0]:
@@ -40,66 +46,64 @@ def list_dir_guest(vmx, user, pwd, guest_dir):
     return entries
 
 def copy_from_guest(vmx, user, pwd, guest_path, host_path):
-    rc, _, err = vmrun_call("-T", "ws", "-gu", user, "-gp", pwd,
+    rc, _, _ = vmrun_call("-T", "ws", "-gu", user, "-gp", pwd,
                             "CopyFileFromGuestToHost", vmx, guest_path, host_path)
     return rc == 0
 
 def delete_guest_file(vmx, user, pwd, guest_path):
-    rc, _, err = vmrun_call("-T", "ws", "-gu", user, "-gp", pwd,
+    rc, _, _ = vmrun_call("-T", "ws", "-gu", user, "-gp", pwd,
                             "deleteFileInGuest", vmx, guest_path)
     return rc == 0
 
 def main():
     parser = argparse.ArgumentParser(description="Ubuntu Host Collector for experimental Windows VMs")
-    parser.add_argument("--vmx",        help="Path to the .vmx file on Ubuntu")
-    parser.add_argument("--guest-user", help="Guest Windows username")
-    parser.add_argument("--guest-pass", help="Guest Windows password")
+    # 위치 기반 인자(Positional)와 선택적 인자(Optional)를 모두 지원하도록 수정
+    parser.add_argument("vmx_pos",        nargs='?', help="Path to the .vmx file")
+    parser.add_argument("user_pos",       nargs='?', help="Guest Windows username")
+    parser.add_argument("pass_pos",       nargs='?', help="Guest Windows password")
     
-    # 여러 대의 VM을 실험하므로 구분하기 쉬운 폴더 할당 기능 추가
-    parser.add_argument("--vm-name",  help="Name of the experimental VM (e.g., VM01).")
+    parser.add_argument("--vmx",        help="Path to the .vmx file (Optional override)")
+    parser.add_argument("--guest-user", help="Guest Windows username (Optional override)")
+    parser.add_argument("--guest-pass", help="Guest Windows password (Optional override)")
+    parser.add_argument("--vm-name",    help="Name of the experimental VM (e.g., VM01)")
     
-    parser.add_argument("--trace-dir",
-                        default=r"C:\Users\user\trace",
-                        help="Guest Windows trace directory (Must use Windows paths)")
-    parser.add_argument("--dump-dir",
-                        default=r"C:\Users\user\Downloads\Build\dump_workspace",
-                        help="Guest Windows dump directory (Must use Windows paths)")
-    parser.add_argument("--out",      default="./loot",
-                        help="Host output base directory (Ubuntu path, default: ./loot)")
-    parser.add_argument("--interval", type=int, default=3,
-                        help="Polling interval in seconds")
+    parser.add_argument("--trace-dir",  default=None, help="Guest Windows trace directory")
+    parser.add_argument("--dump-dir",   default=None, help="Guest Windows dump directory")
+    parser.add_argument("--out",        default="./loot", help="Host output base directory")
+    parser.add_argument("--interval",   type=int, default=3, help="Polling interval in seconds")
     
-    # Parse existing args
-    args, unknown = parser.parse_known_args()
+    args = parser.parse_args()
 
-    # 대화형 입력 처리 (명령줄 인자가 없을 경우)
-    print("="*60)
-    print(" Ubuntu Ransomware Data Host Collector (대화형 모드)")
-    print("="*60)
-    
-    if not args.vmx:
-        args.vmx = input("1. VMX 파일 경로를 입력(또는 복사해서 붙여넣기)하세요: ").strip().replace('"', '').replace("'", "")
-        if not args.vmx:
-            print("[ERROR] VMX 경로가 필요합니다.")
-            sys.exit(1)
+    # 값 병합 (명령줄 입력 우선)
+    vmx = args.vmx or args.vmx_pos
+    guest_user = args.guest_user or args.user_pos
+    guest_pass = args.guest_pass or args.pass_pos
 
-    if not args.out or args.out == "./loot":
-        user_out = input("2. 호스트 저장 저장 절대 경로를 입력하세요 (엔터 시 ./loot): ").strip().replace('"', '').replace("'", "")
-        if user_out: args.out = user_out
+    # 대화형 입력 처리 (값이 하나라도 없을 경우)
+    if not (vmx and guest_user and guest_pass):
+        print("="*60)
+        print(" Ubuntu Ransomware Data Host Collector (대화형 모드)")
+        print("="*60)
+        if not vmx:
+            vmx = input("1. VMX 파일 경로를 입력하세요: ").strip().replace('"', '').replace("'", "")
+        if not guest_user:
+            guest_user = input("2. VM 윈도우 계정명 (엔터 시 기본값 user): ").strip()
+            if not guest_user: guest_user = "user"
+        if not guest_pass:
+            guest_pass = input("3. VM 윈도우 비밀번호 (엔터 시 기본값 1234): ").strip()
+            if not guest_pass: guest_pass = "1234"
+        print("-"*60)
 
-    if not args.guest_user:
-        user_input = input("3. VM 윈도우 계정명 (엔터 시 기본값 user): ").strip()
-        args.guest_user = user_input if user_input else "user"
+    # 경로 자동 보정 (계정명에 맞춰 기본 경로 설정)
+    trace_dir = args.trace_dir if args.trace_dir else f"C:\\Users\\{guest_user}\\trace"
+    dump_dir = args.dump_dir if args.dump_dir else f"C:\\Users\\{guest_user}\\Downloads\\Build\\dump_workspace"
 
-    if not args.guest_pass:
-        pass_input = input("4. VM 윈도우 비밀번호 (엔터 시 기본값 1234): ").strip()
-        args.guest_pass = pass_input if pass_input else "1234"
-    
-    if not args.vm_name:
-        name_input = input("5. 실험 VM 이름 (엔터 시 폴더 분리 안 함): ").strip()
-        if name_input: args.vm_name = name_input
-    
-    print("-"*60)
+    # 전역 args 객체 대신 변수 사용을 위해 덮어쓰기
+    args.vmx = vmx
+    args.guest_user = guest_user
+    args.guest_pass = guest_pass
+    args.trace_dir = trace_dir
+    args.dump_dir = dump_dir
 
     # 호스트 저장 폴더 결정 (vm-name 파라미터가 있다면 서브폴더로 분리)
     if args.vm_name:
