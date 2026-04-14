@@ -52,39 +52,36 @@ def main():
     
     args = parser.parse_args()
 
-    log_msg(f"Started tracking '{args.target}'. Sleeping {args.delay} seconds to wait for unpacking...")
+    log_msg(f"Started tracking '{args.target}'. Polling every 0.3s (Timeout: {args.delay}s)...")
     
-    # 지정된 초만큼 대기 (랜섬웨어 언팩 및 런타임 진입)
-    time.sleep(args.delay)
-    
-    # PID 찾기 (최대 3회 재시도)
+    # 0.3초 간격 고속 폴링 — conti처럼 10초 안에 끝나는 랜섬웨어도 놓치지 않음
+    start_time = time.time()
     pid = None
-    for attempt in range(3):
+    while (time.time() - start_time) < args.delay:
         pid = get_pid_by_name(args.target)
         if pid:
+            log_msg(f"[!] '{args.target}' detected at PID {pid}! Launching dump immediately...")
             break
-        log_msg(f"Process '{args.target}' not found. Retrying in 10s... ({attempt+1}/3)")
-        
-        # DEBUG: log all running process names briefly to see what is actually running
+        time.sleep(0.3)
+
+    if not pid:
+        log_msg(f"'{args.target}' did not appear within {args.delay}s.")
         try:
             full_out = subprocess.check_output('tasklist /NH /FO CSV', shell=True).decode('ansi', errors='ignore')
             running_names = set()
             for ln in full_out.strip().split('\n'):
                 pp = ln.split('","')
                 if len(pp) >= 1: running_names.add(pp[0].replace('"', ''))
-            # Print only a subset or if it resembles the target
-            similars = [n for n in running_names if args.target[:4].lower() in n.lower() or 'wannacry' in n.lower() or 'tasksche' in n.lower() or 'decrypt' in n.lower()]
+            similars = [n for n in running_names if args.target[:4].lower() in n.lower() or 'crypt' in n.lower()]
             if similars:
-                log_msg(f"Similar processes running: {', '.join(similars)}")
+                log_msg(f"Similar processes: {', '.join(similars)}")
         except: pass
-        
-        time.sleep(10)
-        
-    if not pid:
-        log_msg(f"Could not find '{args.target}'. Exiting auto-dump monitor.")
+        log_msg("Exiting auto-dump monitor.")
         sys.exit(1)
 
+    # 안정화 대기 없음 — 발견 즉시 덤프 실행 (고속 종료 랜섬웨어 대응)
     log_msg(f"Found {args.target} running at PID {pid}. Launching memory dumper...")
+
     
     script_dir = os.path.dirname(os.path.abspath(__file__))
     dumper_script = os.path.join(script_dir, "memory_dumper.py")
