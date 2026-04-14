@@ -29,6 +29,9 @@ def list_dir_guest(vmx, user, pwd, guest_dir):
     rc, out, err = vmrun_call("-T", "ws", "-gu", user, "-gp", pwd,
                               "listDirectoryInGuest", vmx, guest_dir)
     if rc != 0:
+        # 에러 메시지가 있을 경우 출력하여 원인 파악 도움
+        if err:
+            log_msg(f"vmrun error: {err}", "ERROR")
         return None
     lines = out.splitlines()
     if not lines or "Directory list" not in lines[0]:
